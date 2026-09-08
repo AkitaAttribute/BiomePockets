@@ -15,6 +15,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.progress.ChunkProgressListener;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.StructureFeatureManager;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.FixedBiomeSource;
@@ -26,8 +27,8 @@ import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
-import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.storage.DerivedLevelData;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -99,15 +100,33 @@ public final class PocketDimensionManager {
     }
 
     private static void generatePocketArea(ServerLevel pocket) {
-        // FULL explicitly runs the complete vanilla generation pipeline, including
-        // the FEATURES/biome-decoration stage that places trees, grass, flowers, etc.
+        if (!(pocket.getChunkSource().getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
+            throw new IllegalStateException("Pocket level is not using the bounded pocket generator");
+        }
+
+        // First let the normal chunk pipeline produce all nine chunks through FULL.
+        // Biome decoration is intentionally deferred by BoundedNoiseBasedChunkGenerator
+        // so we can run the actual vanilla population method exactly once after all of
+        // the pocket terrain exists.
+        List<ChunkAccess> pocketChunks = new ArrayList<>(9);
         for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
             for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
                 ChunkAccess chunk = pocket.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
                 if (chunk == null) {
                     throw new IllegalStateException("Failed to fully generate pocket chunk " + chunkX + "," + chunkZ);
                 }
+                pocketChunks.add(chunk);
             }
+        }
+
+        // In 1.18.2, ChunkGenerator.applyBiomeDecoration is the vanilla population
+        // routine used for placed biome features: trees, grass, flowers, ores,
+        // springs, patches, and similar decoration. Run it explicitly for each of
+        // the nine real chunks instead of assuming the dynamic level's FEATURES
+        // transition invoked it correctly.
+        StructureFeatureManager structureFeatureManager = pocket.structureFeatureManager();
+        for (ChunkAccess chunk : pocketChunks) {
+            generator.decoratePocketChunk(pocket, chunk, structureFeatureManager);
         }
     }
 
