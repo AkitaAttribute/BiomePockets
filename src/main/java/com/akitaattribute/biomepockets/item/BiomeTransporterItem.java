@@ -25,7 +25,7 @@ public class BiomeTransporterItem extends Item {
         if (!level.isClientSide && player instanceof ServerPlayer serverPlayer) {
             List<ResourceLocation> biomes = BiomeCatalog.getBiomeIds(serverPlayer.getServer());
             if (biomes.isEmpty()) {
-                serverPlayer.sendSystemMessage(new TextComponent("BiomePockets could not find any registered biomes."));
+                serverPlayer.displayClientMessage(new TextComponent("BiomePockets could not find any registered biomes."), false);
                 return InteractionResultHolder.fail(stack);
             }
 
