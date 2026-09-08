@@ -3,6 +3,7 @@ package com.akitaattribute.biomepockets.world;
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.google.common.collect.ImmutableList;
 import com.mojang.serialization.Lifecycle;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.Registry;
@@ -17,10 +18,12 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.FixedBiomeSource;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.levelgen.Heightmap;
-import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
@@ -51,11 +54,16 @@ public final class PocketDimensionManager {
     private static final String POCKET_PREFIX = "pocket_";
     private static final String MARKER_FILE = ".biomepockets-owned";
 
-    // Chunks -1..1 in both axes: exactly the requested 3x3 playable area.
+    // Real terrain exists only in chunks -1..1 in both axes.
     private static final int MIN_POCKET_CHUNK = -1;
     private static final int MAX_POCKET_CHUNK = 1;
-    private static final double POCKET_BORDER_CENTER = 8.0D;
-    private static final double POCKET_BORDER_SIZE = 48.0D;
+
+    // Those chunks cover blocks -16..31. The physical barrier is one block outside
+    // that footprint so all 48x48 terrain blocks remain usable.
+    private static final int MIN_POCKET_BLOCK = MIN_POCKET_CHUNK * 16;
+    private static final int MAX_POCKET_BLOCK = ((MAX_POCKET_CHUNK + 1) * 16) - 1;
+    private static final int MIN_BARRIER_BLOCK = MIN_POCKET_BLOCK - 1;
+    private static final int MAX_BARRIER_BLOCK = MAX_POCKET_BLOCK + 1;
 
     private static final Map<ResourceKey<Level>, PocketRecord> OWNED = new HashMap<>();
 
@@ -79,18 +87,44 @@ public final class PocketDimensionManager {
             OWNED.put(levelKey, record);
             writeOwnershipMarker(levelKey, folder);
 
-            // Generate the full requested 3x3 area up front so the destination is ready before teleport.
-            for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
-                for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
-                    pocket.getChunk(chunkX, chunkZ);
-                }
-            }
+            generatePocketArea(pocket);
+            buildBarrierWall(pocket);
 
             int y = pocket.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
             y = Math.max(y + 1, pocket.getMinBuildHeight() + 2);
             player.teleportTo(pocket, 0.5D, y, 0.5D, player.getYRot(), player.getXRot());
         } catch (Exception exception) {
             BiomePockets.LOGGER.error("Unable to create biome pocket for {}", biomeId, exception);
+        }
+    }
+
+    private static void generatePocketArea(ServerLevel pocket) {
+        // FULL explicitly runs the complete vanilla generation pipeline, including
+        // the FEATURES/biome-decoration stage that places trees, grass, flowers, etc.
+        for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
+            for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
+                ChunkAccess chunk = pocket.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+                if (chunk == null) {
+                    throw new IllegalStateException("Failed to fully generate pocket chunk " + chunkX + "," + chunkZ);
+                }
+            }
+        }
+    }
+
+    private static void buildBarrierWall(ServerLevel pocket) {
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        int minY = pocket.getMinBuildHeight();
+        int maxY = pocket.getMaxBuildHeight();
+
+        for (int y = minY; y < maxY; y++) {
+            for (int x = MIN_BARRIER_BLOCK; x <= MAX_BARRIER_BLOCK; x++) {
+                pocket.setBlock(pos.set(x, y, MIN_BARRIER_BLOCK), Blocks.BARRIER.defaultBlockState(), 2);
+                pocket.setBlock(pos.set(x, y, MAX_BARRIER_BLOCK), Blocks.BARRIER.defaultBlockState(), 2);
+            }
+            for (int z = MIN_POCKET_BLOCK; z <= MAX_POCKET_BLOCK; z++) {
+                pocket.setBlock(pos.set(MIN_BARRIER_BLOCK, y, z), Blocks.BARRIER.defaultBlockState(), 2);
+                pocket.setBlock(pos.set(MAX_BARRIER_BLOCK, y, z), Blocks.BARRIER.defaultBlockState(), 2);
+            }
         }
     }
 
@@ -164,12 +198,14 @@ public final class PocketDimensionManager {
         Registry<DimensionType> dimensionTypes = server.registryAccess().registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY);
 
         long seed = server.getWorldData().worldGenSettings().seed() ^ UUID.randomUUID().getMostSignificantBits();
-        NoiseBasedChunkGenerator generator = new NoiseBasedChunkGenerator(
+        BoundedNoiseBasedChunkGenerator generator = new BoundedNoiseBasedChunkGenerator(
                 structureSets,
                 noiseParameters,
                 new FixedBiomeSource(biome),
                 seed,
-                noiseSettings.getHolderOrThrow(NoiseGeneratorSettings.OVERWORLD)
+                noiseSettings.getHolderOrThrow(NoiseGeneratorSettings.OVERWORLD),
+                MIN_POCKET_CHUNK,
+                MAX_POCKET_CHUNK
         );
         LevelStem stem = new LevelStem(dimensionTypes.getHolderOrThrow(DimensionType.OVERWORLD_LOCATION), generator);
         ResourceKey<LevelStem> stemKey = ResourceKey.create(Registry.LEVEL_STEM_REGISTRY, levelKey.location());
@@ -206,13 +242,6 @@ public final class PocketDimensionManager {
                 ImmutableList.of(),
                 false
         );
-
-        // Pocket borders are intentionally independent from the overworld border.
-        // Centering at 8 with size 48 places the border exactly on chunk boundaries -16 and 32.
-        newLevel.getWorldBorder().setCenter(POCKET_BORDER_CENTER, POCKET_BORDER_CENTER);
-        newLevel.getWorldBorder().setSize(POCKET_BORDER_SIZE);
-        newLevel.getWorldBorder().setWarningBlocks(0);
-        newLevel.getWorldBorder().setWarningTime(0);
 
         worlds.put(levelKey, newLevel);
         server.markWorldsDirty();
