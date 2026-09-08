@@ -24,10 +24,16 @@ import java.util.concurrent.Executor;
  * Overworld-style noise generator that only produces real worldgen in the configured
  * pocket chunk square. Minecraft may still request dependency/view-distance chunks,
  * but those chunks remain empty instead of producing additional terrain.
+ *
+ * Biome decoration is deliberately deferred from the normal FEATURES transition.
+ * Dynamic pocket levels have proven to reach terrain/carvers/FULL without reliably
+ * executing biome population, so PocketDimensionManager invokes exactly one explicit
+ * vanilla decoration pass after all nine terrain chunks exist.
  */
 public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenerator {
     private final int minPocketChunk;
     private final int maxPocketChunk;
+    private final NoiseBasedChunkGenerator decorationGenerator;
 
     public BoundedNoiseBasedChunkGenerator(
             Registry<StructureSet> structureSets,
@@ -38,6 +44,13 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
             int minPocketChunk,
             int maxPocketChunk) {
         super(structureSets, noiseParameters, biomeSource, seed, settings);
+        this.decorationGenerator = new NoiseBasedChunkGenerator(
+                structureSets,
+                noiseParameters,
+                biomeSource,
+                seed,
+                settings
+        );
         this.minPocketChunk = minPocketChunk;
         this.maxPocketChunk = maxPocketChunk;
     }
@@ -89,8 +102,22 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
             WorldGenLevel level,
             ChunkAccess chunk,
             StructureFeatureManager structureFeatureManager) {
+        // Intentionally deferred. See decoratePocketChunk(). This prevents a possible
+        // normal FEATURES pass plus an explicit pass from decorating a chunk twice.
+    }
+
+    /**
+     * Runs the standard 1.18.2 NoiseBasedChunkGenerator biome-population routine once
+     * the complete 3x3 pocket terrain exists. This is vanilla's normal placed-feature
+     * path for trees, grass, flowers, ores, springs, and other biome decoration.
+     */
+    public void decoratePocketChunk(
+            WorldGenLevel level,
+            ChunkAccess chunk,
+            StructureFeatureManager structureFeatureManager) {
         if (isPocketChunk(chunk)) {
-            super.applyBiomeDecoration(level, chunk, structureFeatureManager);
+            decorationGenerator.applyBiomeDecoration(level, chunk, structureFeatureManager);
+            chunk.setUnsaved(true);
         }
     }
 
