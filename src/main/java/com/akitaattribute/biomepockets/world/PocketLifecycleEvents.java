@@ -1,7 +1,9 @@
 package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
@@ -16,6 +18,14 @@ public final class PocketLifecycleEvents {
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
             PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getPlayer() instanceof ServerPlayer player) {
+            ResourceKey<Level> departingDimension = player.getLevel().dimension();
+            PocketDimensionManager.handleDeparture(player.getServer(), departingDimension);
         }
     }
 
