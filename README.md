@@ -9,6 +9,20 @@ First-pass Forge 1.18.2 mod for temporary, single-biome pocket dimensions.
 
 Biome discovery is registry-driven. There are no hard dependencies on Biomes O' Plenty or Oh The Biomes You'll Go; if their biomes are registered, they appear automatically alongside vanilla and other mod/datapack biomes.
 
+## Pocket shape
+
+Each pocket retains the normal 1.18.2 Overworld vertical range and terrain generation, but the playable footprint is exactly a 3x3 chunk square:
+
+```text
+000
+000
+000
+```
+
+The playable chunks are `-1..1` on both X and Z. A per-pocket world border is centered at block `(8, 8)` and set to 48 blocks wide, placing its edges exactly on the outer chunk boundaries at `-16` and `32`. The nine playable chunks are generated before the player is teleported in.
+
+The pocket border is independent of the overworld border and is not synchronized to it.
+
 ## Pocket lifecycle and deletion safety
 
 Every use creates a fresh `biomepockets:pocket_<uuid>` dimension. A pocket is unloaded after the last player actually changes dimension out of it. Other players can enter it by command while it exists; it remains alive until the last one leaves.
@@ -37,3 +51,5 @@ Java 17, Minecraft 1.18.2, Forge 40.3.12.
 ```text
 gradle build
 ```
+
+GitHub Actions is push-only and follows the same numbered-artifact pattern used by MCMoltenMetals: each branch build uploads a `biome-pockets-<branch-commit-number>.jar` artifact.
