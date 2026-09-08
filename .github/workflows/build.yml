@@ -1,22 +1,79 @@
 name: Build
-
 on:
   push:
-    branches:
-      - main
-      - 'feature/**'
-  pull_request:
-
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.8'
-      - run: gradle build --no-daemon --stacktrace
+      - name: Build
+        run: gradle --no-daemon clean build
+      - name: Compute branch artifact version
+        id: artifact_version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch="${GITHUB_REF_NAME}"
+          default_branch="$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')"
+
+          if [ "$branch" = "$default_branch" ]; then
+            branch_version="$(git rev-list --count HEAD)"
+            base="$default_branch"
+          else
+            git fetch --no-tags --prune origin "$default_branch"
+            base="origin/$default_branch"
+            merge_base="$(git merge-base HEAD "$base" || true)"
+            if [ -n "$merge_base" ]; then
+              branch_version="$(git rev-list --count "${merge_base}..HEAD")"
+            else
+              branch_version="$(git rev-list --count HEAD)"
+            fi
+          fi
+
+          if [ -z "$branch_version" ] || [ "$branch_version" -lt 1 ]; then
+            branch_version=1
+          fi
+
+          file_name="biome-pockets-${branch_version}.jar"
+
+          echo "Branch: $branch"
+          echo "Base: $base"
+          echo "Branch artifact version: $branch_version"
+          echo "file_name=$file_name" >> "$GITHUB_OUTPUT"
+      - name: Prepare numbered jar
+        run: |
+          set -euo pipefail
+          mkdir -p build/numbered-libs
+          jar_file="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' \
+            ! -name '*-dev.jar' \
+            ! -name '*-deobf.jar' \
+            ! -name '*-api.jar' \
+            | sort | head -n 1)"
+          if [ -z "$jar_file" ]; then
+            echo "No release jar found in build/libs" >&2
+            exit 1
+          fi
+          cp "$jar_file" "build/numbered-libs/${{ steps.artifact_version.outputs.file_name }}"
+          echo "Prepared build/numbered-libs/${{ steps.artifact_version.outputs.file_name }} from $jar_file"
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact_version.outputs.file_name }}
+          path: build/numbered-libs/${{ steps.artifact_version.outputs.file_name }}
+          if-no-files-found: error
