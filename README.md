@@ -9,9 +9,11 @@ First-pass Forge 1.18.2 mod for temporary, single-biome pocket dimensions.
 
 Biome discovery is registry-driven. There are no hard dependencies on Biomes O' Plenty or Oh The Biomes You'll Go; if their biomes are registered, they appear automatically alongside vanilla and other mod/datapack biomes.
 
+For testing, `/biomepockets <item>` gives the executing player one of the mod items. Tab completion currently exposes `biome_transporter` and `biome_transporter_selector`.
+
 ## Pocket shape
 
-Each pocket retains the normal 1.18.2 Overworld vertical range and terrain generation, but the playable footprint is exactly a 3x3 chunk square:
+Each pocket retains the normal 1.18.2 Overworld vertical range and terrain generation, but real terrain is restricted to exactly a 3x3 chunk square:
 
 ```text
 000
@@ -19,9 +21,11 @@ Each pocket retains the normal 1.18.2 Overworld vertical range and terrain gener
 000
 ```
 
-The playable chunks are `-1..1` on both X and Z. A per-pocket world border is centered at block `(8, 8)` and set to 48 blocks wide, placing its edges exactly on the outer chunk boundaries at `-16` and `32`. The nine playable chunks are generated before the player is teleported in.
+The terrain chunks are `-1..1` on both X and Z, covering blocks `-16..31` on each horizontal axis. Those nine chunks are explicitly generated through `ChunkStatus.FULL` before the player is teleported in, which includes the normal FEATURES/biome-decoration stage used for trees, grass, flowers, and other biome decoration.
 
-The pocket border is independent of the overworld border and is not synchronized to it.
+Minecraft's generation and view-distance systems may still request surrounding dependency chunks. BiomePockets uses a bounded noise generator so those outside chunks remain void: they do not receive terrain, surface generation, carvers, structures, or biome decoration.
+
+A full-height barrier-block wall is placed one block outside the 3x3 terrain footprint, at block coordinates `-17` and `32`. This gives the player all 48x48 terrain blocks while providing a physical collision boundary that players and mobs cannot cross. The previous per-pocket world-border approach was removed.
 
 ## Pocket lifecycle and deletion safety
 
@@ -40,7 +44,7 @@ On orderly server shutdown, players still inside active pockets are returned to 
 
 ## First-pass behavior
 
-Pocket terrain uses the normal Overworld noise generator with a `FixedBiomeSource` for the selected biome. This is intentionally generic and lets vanilla, BOP, BYG, and datapack biomes work without compile-time integration. Biomes designed specifically around Nether/End terrain may therefore look unusual.
+Pocket terrain uses Overworld noise generation with a `FixedBiomeSource` for the selected biome. The bounded generator delegates the full normal worldgen pipeline only for the nine pocket chunks and leaves requested outside chunks empty. This is intentionally generic and lets vanilla, BOP, BYG, and datapack biomes work without compile-time integration. Biomes designed specifically around Nether/End terrain may therefore look unusual.
 
 There is not yet a dedicated return item/portal. Leaving by command or any other dimension-changing mechanic triggers the normal empty-pocket teardown.
 
