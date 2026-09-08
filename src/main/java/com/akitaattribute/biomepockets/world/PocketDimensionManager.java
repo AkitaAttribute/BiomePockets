@@ -17,8 +17,6 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.FixedBiomeSource;
-import net.minecraft.world.level.border.BorderChangeListener;
-import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -52,6 +50,13 @@ import java.util.stream.Stream;
 public final class PocketDimensionManager {
     private static final String POCKET_PREFIX = "pocket_";
     private static final String MARKER_FILE = ".biomepockets-owned";
+
+    // Chunks -1..1 in both axes: exactly the requested 3x3 playable area.
+    private static final int MIN_POCKET_CHUNK = -1;
+    private static final int MAX_POCKET_CHUNK = 1;
+    private static final double POCKET_BORDER_CENTER = 8.0D;
+    private static final double POCKET_BORDER_SIZE = 48.0D;
+
     private static final Map<ResourceKey<Level>, PocketRecord> OWNED = new HashMap<>();
 
     private PocketDimensionManager() { }
@@ -74,7 +79,13 @@ public final class PocketDimensionManager {
             OWNED.put(levelKey, record);
             writeOwnershipMarker(levelKey, folder);
 
-            pocket.getChunk(0, 0);
+            // Generate the full requested 3x3 area up front so the destination is ready before teleport.
+            for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
+                for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
+                    pocket.getChunk(chunkX, chunkZ);
+                }
+            }
+
             int y = pocket.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
             y = Math.max(y + 1, pocket.getMinBuildHeight() + 2);
             player.teleportTo(pocket, 0.5D, y, 0.5D, player.getYRot(), player.getXRot());
@@ -196,7 +207,13 @@ public final class PocketDimensionManager {
                 false
         );
 
-        overworld.getWorldBorder().addListener(new BorderChangeListener.DelegateBorderChangeListener(newLevel.getWorldBorder()));
+        // Pocket borders are intentionally independent from the overworld border.
+        // Centering at 8 with size 48 places the border exactly on chunk boundaries -16 and 32.
+        newLevel.getWorldBorder().setCenter(POCKET_BORDER_CENTER, POCKET_BORDER_CENTER);
+        newLevel.getWorldBorder().setSize(POCKET_BORDER_SIZE);
+        newLevel.getWorldBorder().setWarningBlocks(0);
+        newLevel.getWorldBorder().setWarningTime(0);
+
         worlds.put(levelKey, newLevel);
         server.markWorldsDirty();
         MinecraftForge.EVENT_BUS.post(new WorldEvent.Load(newLevel));
@@ -247,7 +264,6 @@ public final class PocketDimensionManager {
         }
 
         MinecraftForge.EVENT_BUS.post(new WorldEvent.Unload(removed));
-        removeBorderListener(server, removed);
 
         try {
             removed.close();
@@ -274,26 +290,6 @@ public final class PocketDimensionManager {
             }
         }
         worldGenSettings.dimensions = newRegistry;
-    }
-
-    private static void removeBorderListener(MinecraftServer server, ServerLevel removedLevel) {
-        ServerLevel overworld = server.getLevel(Level.OVERWORLD);
-        if (overworld == null) {
-            return;
-        }
-        WorldBorder overworldBorder = overworld.getWorldBorder();
-        WorldBorder removedBorder = removedLevel.getWorldBorder();
-        BorderChangeListener target = null;
-        for (BorderChangeListener listener : new ArrayList<>(overworldBorder.listeners)) {
-            if (listener instanceof BorderChangeListener.DelegateBorderChangeListener delegate
-                    && delegate.worldBorder == removedBorder) {
-                target = listener;
-                break;
-            }
-        }
-        if (target != null) {
-            overworldBorder.removeListener(target);
-        }
     }
 
     private static boolean isPocketKey(ResourceKey<Level> key) {
