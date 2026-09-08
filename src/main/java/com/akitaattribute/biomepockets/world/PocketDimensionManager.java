@@ -13,6 +13,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.server.level.progress.ChunkProgressListener;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.StructureFeatureManager;
@@ -58,6 +59,10 @@ public final class PocketDimensionManager {
     // Real terrain exists only in chunks -1..1 in both axes.
     private static final int MIN_POCKET_CHUNK = -1;
     private static final int MAX_POCKET_CHUNK = 1;
+
+    // Vanilla placed features are generated in a centered WorldGenRegion and may
+    // legitimately read/write one neighboring chunk while decorating the center.
+    private static final int DECORATION_REGION_RADIUS = 1;
 
     // Those chunks cover blocks -16..31. The physical barrier is one block outside
     // that footprint so all 48x48 terrain blocks remain usable.
@@ -106,8 +111,8 @@ public final class PocketDimensionManager {
 
         // First let the normal chunk pipeline produce all nine chunks through FULL.
         // Biome decoration is intentionally deferred by BoundedNoiseBasedChunkGenerator
-        // so we can run the actual vanilla population method exactly once after all of
-        // the pocket terrain exists.
+        // so we can run the actual population stage exactly once after all pocket
+        // terrain exists.
         List<ChunkAccess> pocketChunks = new ArrayList<>(9);
         for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
             for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
@@ -119,15 +124,39 @@ public final class PocketDimensionManager {
             }
         }
 
-        // In 1.18.2, ChunkGenerator.applyBiomeDecoration is the vanilla population
-        // routine used for placed biome features: trees, grass, flowers, ores,
-        // springs, patches, and similar decoration. Run it explicitly for each of
-        // the nine real chunks instead of assuming the dynamic level's FEATURES
-        // transition invoked it correctly.
-        StructureFeatureManager structureFeatureManager = pocket.structureFeatureManager();
+        // The important part is the WorldGenRegion. Vanilla's FEATURES stage does not
+        // decorate against the raw ServerLevel: it supplies a centered generation
+        // region plus a region-scoped StructureFeatureManager. A raw ServerLevel can
+        // produce terrain and caves correctly while placed features never behave like
+        // normal chunk population, especially for modded biome hooks.
         for (ChunkAccess chunk : pocketChunks) {
-            generator.decoratePocketChunk(pocket, chunk, structureFeatureManager);
+            WorldGenRegion region = createDecorationRegion(pocket, chunk);
+            StructureFeatureManager structures = pocket.structureFeatureManager().forWorldGenRegion(region);
+            generator.decoratePocketChunk(region, chunk, structures);
         }
+    }
+
+    private static WorldGenRegion createDecorationRegion(ServerLevel pocket, ChunkAccess centerChunk) {
+        int centerX = centerChunk.getPos().x;
+        int centerZ = centerChunk.getPos().z;
+        int diameter = (DECORATION_REGION_RADIUS * 2) + 1;
+        List<ChunkAccess> regionChunks = new ArrayList<>(diameter * diameter);
+
+        // WorldGenRegion stores a square cache in row-major order: Z rows, X columns,
+        // with the center chunk at the middle element. Outside the 3x3 pocket the
+        // bounded generator returns void chunks, which still provide the dependency
+        // neighborhood expected by normal feature placement without exposing terrain.
+        for (int z = centerZ - DECORATION_REGION_RADIUS; z <= centerZ + DECORATION_REGION_RADIUS; z++) {
+            for (int x = centerX - DECORATION_REGION_RADIUS; x <= centerX + DECORATION_REGION_RADIUS; x++) {
+                ChunkAccess dependency = pocket.getChunkSource().getChunk(x, z, ChunkStatus.FULL, true);
+                if (dependency == null) {
+                    throw new IllegalStateException("Failed to prepare decoration dependency chunk " + x + "," + z);
+                }
+                regionChunks.add(dependency);
+            }
+        }
+
+        return new WorldGenRegion(pocket, regionChunks, ChunkStatus.FEATURES, DECORATION_REGION_RADIUS);
     }
 
     private static void buildBarrierWall(ServerLevel pocket) {
