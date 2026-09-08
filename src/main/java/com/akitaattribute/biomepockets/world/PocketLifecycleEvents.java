@@ -3,16 +3,20 @@ package com.akitaattribute.biomepockets.world;
 import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 /**
- * Pocket lifetime is tied to an explicit dimension departure, not connection state.
+ * Pocket lifetime is tied to an explicit dimension departure, not player connection
+ * state. Disconnecting because of logout, a dropped connection, or a client crash
+ * must leave the pocket intact so vanilla player data can restore the player to the
+ * same dimension and coordinates on reconnect.
  *
- * Disconnecting (including a dropped connection or client crash) must leave the
- * pocket intact so vanilla player data can restore the player to the same dimension
- * and coordinates on reconnect. Likewise, server shutdown/startup must not be treated
- * as every player leaving their pocket.
+ * Full server process persistence is still handled separately by the existing
+ * startup/shutdown cleanup path; runtime pocket generators are not yet serialized as
+ * persistent custom dimension definitions.
  */
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketLifecycleEvents {
@@ -23,5 +27,19 @@ public final class PocketLifecycleEvents {
         if (event.getPlayer() instanceof ServerPlayer player) {
             PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
         }
+    }
+
+    // Deliberately no PlayerLoggedOutEvent teardown. A disconnect is not an explicit
+    // departure from the pocket and the player must be able to reconnect where they
+    // were standing.
+
+    @SubscribeEvent
+    public static void onServerStarted(ServerStartedEvent event) {
+        PocketDimensionManager.cleanupStalePockets(event.getServer());
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        PocketDimensionManager.shutdown(event.getServer());
     }
 }
