@@ -21,7 +21,9 @@ Each pocket retains the normal 1.18.2 Overworld vertical range and terrain gener
 000
 ```
 
-The terrain chunks are `-1..1` on both X and Z, covering blocks `-16..31` on each horizontal axis. Those nine chunks are explicitly generated through `ChunkStatus.FULL` before the player is teleported in, which includes the normal FEATURES/biome-decoration stage used for trees, grass, flowers, and other biome decoration.
+The terrain chunks are `-1..1` on both X and Z, covering blocks `-16..31` on each horizontal axis. The nine chunks are first generated through `ChunkStatus.FULL` for the normal terrain/surface/carver pipeline.
+
+Biome population is then run explicitly once for each of those nine chunks through vanilla 1.18.2's `NoiseBasedChunkGenerator.applyBiomeDecoration(...)` path. This is the standard placed-feature routine responsible for trees, grass, flowers, ores, springs, patches, and other biome decoration. The bounded generator deliberately suppresses its normal FEATURES decoration hook so a pocket chunk cannot be populated twice.
 
 Minecraft's generation and view-distance systems may still request surrounding dependency chunks. BiomePockets uses a bounded noise generator so those outside chunks remain void: they do not receive terrain, surface generation, carvers, structures, or biome decoration.
 
@@ -44,7 +46,7 @@ On orderly server shutdown, players still inside active pockets are returned to 
 
 ## First-pass behavior
 
-Pocket terrain uses Overworld noise generation with a `FixedBiomeSource` for the selected biome. The bounded generator delegates the full normal worldgen pipeline only for the nine pocket chunks and leaves requested outside chunks empty. This is intentionally generic and lets vanilla, BOP, BYG, and datapack biomes work without compile-time integration. Biomes designed specifically around Nether/End terrain may therefore look unusual.
+Pocket terrain uses Overworld noise generation with a `FixedBiomeSource` for the selected biome. The bounded generator delegates normal terrain generation only for the nine pocket chunks, while biome population is performed in a separate explicit vanilla decoration pass after those chunks exist. This is intentionally generic and lets vanilla, BOP, BYG, and datapack biomes work without compile-time integration. Biomes designed specifically around Nether/End terrain may therefore look unusual.
 
 There is not yet a dedicated return item/portal. Leaving by command or any other dimension-changing mechanic triggers the normal empty-pocket teardown.
 
