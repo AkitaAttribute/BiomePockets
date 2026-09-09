@@ -4,6 +4,8 @@ import com.akitaattribute.biomepockets.BiomePockets;
 import com.google.common.collect.ImmutableList;
 import com.mojang.datafixers.util.Either;
 import com.mojang.serialization.Lifecycle;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.Registry;
@@ -18,11 +20,15 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.server.level.progress.ChunkProgressListener;
+import net.minecraft.tags.BiomeTags;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.FixedBiomeSource;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.dimension.DimensionType;
@@ -36,7 +42,9 @@ import net.minecraft.world.level.storage.DerivedLevelData;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.WorldData;
+import net.minecraftforge.common.BiomeDictionary;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.common.Tags;
 import net.minecraftforge.event.world.WorldEvent;
 
 import java.io.IOException;
@@ -62,6 +70,8 @@ public final class PocketDimensionManager {
     // Real terrain exists only in chunks -1..1 in both axes.
     private static final int MIN_POCKET_CHUNK = -1;
     private static final int MAX_POCKET_CHUNK = 1;
+    private static final int MIN_POCKET_BLOCK = MIN_POCKET_CHUNK * 16;
+    private static final int MAX_POCKET_BLOCK = ((MAX_POCKET_CHUNK + 1) * 16) - 1;
 
     // Keep the nine requested chunks resident while their asynchronous FULL futures
     // progress through terrain, FEATURES, lighting, and final chunk conversion.
@@ -71,6 +81,7 @@ public final class PocketDimensionManager {
     private static final int PREPARATION_TICKET_RADIUS = 1;
 
     private static final Map<ResourceKey<Level>, PocketRecord> OWNED = new HashMap<>();
+    private static final Map<UUID, PocketReturnPoint> DISCONNECTED_PLAYERS = new HashMap<>();
 
     private PocketDimensionManager() { }
 
@@ -161,15 +172,13 @@ public final class PocketDimensionManager {
             }
 
             // FULL completion means the nine terrain chunks have passed FEATURES and
-            // lighting. The bounded generator also builds the barrier during FEATURES,
-            // so nothing remains to generate synchronously before teleport.
-            int y = pocket.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
-            y = Math.max(y + 1, pocket.getMinBuildHeight() + 2);
+            // lighting. Only after that do we locate or construct a safe arrival point.
+            BlockPos spawn = findSafeSpawn(pocket);
             currentPlayer.teleportTo(
                     pocket,
-                    0.5D,
-                    y,
-                    0.5D,
+                    spawn.getX() + 0.5D,
+                    spawn.getY(),
+                    spawn.getZ() + 0.5D,
                     currentPlayer.getYRot(),
                     currentPlayer.getXRot());
 
@@ -201,8 +210,182 @@ public final class PocketDimensionManager {
         }
     }
 
+    /**
+     * Finds a standable block with two collision-free, fluid-free blocks for the
+     * player's body. The search begins at the center and expands through the complete
+     * 48x48 playable area. Nether pockets therefore find a cavern instead of using the
+     * top bedrock heightmap, while End/void pockets can fall back to a small platform.
+     */
+    private static BlockPos findSafeSpawn(ServerLevel level) {
+        int maxRadius = Math.max(Math.abs(MIN_POCKET_BLOCK), Math.abs(MAX_POCKET_BLOCK));
+        for (int radius = 0; radius <= maxRadius; radius++) {
+            for (int x = -radius; x <= radius; x++) {
+                BlockPos candidate = findSafeInColumn(level, x, -radius);
+                if (candidate != null) {
+                    return candidate;
+                }
+                if (radius != 0) {
+                    candidate = findSafeInColumn(level, x, radius);
+                    if (candidate != null) {
+                        return candidate;
+                    }
+                }
+            }
+            for (int z = -radius + 1; z <= radius - 1; z++) {
+                BlockPos candidate = findSafeInColumn(level, -radius, z);
+                if (candidate != null) {
+                    return candidate;
+                }
+                if (radius != 0) {
+                    candidate = findSafeInColumn(level, radius, z);
+                    if (candidate != null) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        return buildEmergencySpawn(level);
+    }
+
+    private static BlockPos findSafeInColumn(ServerLevel level, int x, int z) {
+        if (x < MIN_POCKET_BLOCK || x > MAX_POCKET_BLOCK || z < MIN_POCKET_BLOCK || z > MAX_POCKET_BLOCK) {
+            return null;
+        }
+
+        int minY = level.getMinBuildHeight() + 1;
+        int maxY = level.getMaxBuildHeight() - 2;
+        if (maxY < minY) {
+            return null;
+        }
+
+        int preferredY = Mth.clamp(
+                level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z),
+                minY,
+                maxY);
+        int maxDelta = maxY - minY;
+        for (int delta = 0; delta <= maxDelta; delta++) {
+            int up = preferredY + delta;
+            if (up <= maxY && isSafeStandingPosition(level, x, up, z)) {
+                return new BlockPos(x, up, z);
+            }
+            int down = preferredY - delta;
+            if (delta != 0 && down >= minY && isSafeStandingPosition(level, x, down, z)) {
+                return new BlockPos(x, down, z);
+            }
+        }
+        return null;
+    }
+
+    private static boolean isSafeStandingPosition(ServerLevel level, int x, int y, int z) {
+        BlockPos feet = new BlockPos(x, y, z);
+        BlockPos head = feet.above();
+        BlockPos floor = feet.below();
+        BlockState floorState = level.getBlockState(floor);
+        return floorState.isFaceSturdy(level, floor, Direction.UP)
+                && isPlayerSpaceClear(level, feet)
+                && isPlayerSpaceClear(level, head);
+    }
+
+    private static boolean isPlayerSpaceClear(ServerLevel level, BlockPos pos) {
+        return level.getBlockState(pos).getCollisionShape(level, pos).isEmpty()
+                && level.getFluidState(pos).isEmpty();
+    }
+
+    private static BlockPos buildEmergencySpawn(ServerLevel level) {
+        int x = 0;
+        int z = 0;
+        int minY = level.getMinBuildHeight() + 1;
+        int maxY = level.getMaxBuildHeight() - 2;
+        int preferredY = Mth.clamp(64, minY, maxY);
+        int y = findClearPairY(level, x, z, preferredY, minY, maxY);
+        if (y == Integer.MIN_VALUE) {
+            y = preferredY;
+            level.setBlockAndUpdate(new BlockPos(x, y, z), Blocks.AIR.defaultBlockState());
+            level.setBlockAndUpdate(new BlockPos(x, y + 1, z), Blocks.AIR.defaultBlockState());
+        }
+
+        // A 3x3 emergency platform is safer than a single block when an End-style
+        // pocket produces no island beneath the center point.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                level.setBlockAndUpdate(new BlockPos(x + dx, y - 1, z + dz), Blocks.OBSIDIAN.defaultBlockState());
+            }
+        }
+        return new BlockPos(x, y, z);
+    }
+
+    private static int findClearPairY(ServerLevel level, int x, int z, int preferredY, int minY, int maxY) {
+        int maxDelta = maxY - minY;
+        for (int delta = 0; delta <= maxDelta; delta++) {
+            int up = preferredY + delta;
+            if (up <= maxY
+                    && isPlayerSpaceClear(level, new BlockPos(x, up, z))
+                    && isPlayerSpaceClear(level, new BlockPos(x, up + 1, z))) {
+                return up;
+            }
+            int down = preferredY - delta;
+            if (delta != 0 && down >= minY
+                    && isPlayerSpaceClear(level, new BlockPos(x, down, z))
+                    && isPlayerSpaceClear(level, new BlockPos(x, down + 1, z))) {
+                return down;
+            }
+        }
+        return Integer.MIN_VALUE;
+    }
+
     public static boolean isOwned(ResourceKey<Level> key) {
         return OWNED.containsKey(key) && isPocketKey(key);
+    }
+
+    public static void rememberDisconnect(ServerPlayer player) {
+        ResourceKey<Level> dimension = player.getLevel().dimension();
+        if (!isOwned(dimension)) {
+            DISCONNECTED_PLAYERS.remove(player.getUUID());
+            return;
+        }
+
+        DISCONNECTED_PLAYERS.put(player.getUUID(), new PocketReturnPoint(
+                dimension,
+                player.getX(),
+                player.getY(),
+                player.getZ(),
+                player.getYRot(),
+                player.getXRot()));
+        BiomePockets.LOGGER.debug(
+                "Reserved pocket {} for disconnected player {}",
+                dimension.location(),
+                player.getGameProfile().getName());
+    }
+
+    public static void restoreAfterLogin(ServerPlayer player) {
+        UUID playerId = player.getUUID();
+        MinecraftServer server = player.getServer();
+        server.execute(() -> {
+            PocketReturnPoint returnPoint = DISCONNECTED_PLAYERS.get(playerId);
+            ServerPlayer currentPlayer = server.getPlayerList().getPlayer(playerId);
+            if (returnPoint == null || currentPlayer == null) {
+                return;
+            }
+
+            ServerLevel pocket = server.getLevel(returnPoint.dimension());
+            if (pocket == null || !isOwned(returnPoint.dimension())) {
+                DISCONNECTED_PLAYERS.remove(playerId);
+                return;
+            }
+
+            currentPlayer.teleportTo(
+                    pocket,
+                    returnPoint.x(),
+                    returnPoint.y(),
+                    returnPoint.z(),
+                    returnPoint.yRot(),
+                    returnPoint.xRot());
+            DISCONNECTED_PLAYERS.remove(playerId);
+            BiomePockets.LOGGER.debug(
+                    "Restored player {} to pocket {} after reconnect",
+                    currentPlayer.getGameProfile().getName(),
+                    returnPoint.dimension().location());
+        });
     }
 
     public static void handleDeparture(MinecraftServer server, ResourceKey<Level> from) {
@@ -220,12 +403,22 @@ public final class PocketDimensionManager {
         ServerLevel level = server.getLevel(key);
         if (level == null) {
             OWNED.remove(key);
+            clearReturnReservations(key);
             return;
         }
-        if (!level.players().isEmpty()) {
+        if (!level.players().isEmpty() || hasReturnReservation(key)) {
             return;
         }
         teardown(server, key, record, false);
+    }
+
+    private static boolean hasReturnReservation(ResourceKey<Level> key) {
+        return DISCONNECTED_PLAYERS.values().stream()
+                .anyMatch(returnPoint -> returnPoint.dimension().equals(key));
+    }
+
+    private static void clearReturnReservations(ResourceKey<Level> key) {
+        DISCONNECTED_PLAYERS.entrySet().removeIf(entry -> entry.getValue().dimension().equals(key));
     }
 
     public static void cleanupStalePockets(MinecraftServer server) {
@@ -256,9 +449,10 @@ public final class PocketDimensionManager {
                 teardown(server, key, record, true);
             }
         }
+        DISCONNECTED_PLAYERS.clear();
     }
 
-    @SuppressWarnings("deprecation")
+    @SuppressWarnings({"deprecation", "removal"})
     private static ServerLevel createLevel(MinecraftServer server, ResourceKey<Level> levelKey, Holder<Biome> biome) {
         Map<ResourceKey<Level>, ServerLevel> worlds = server.forgeGetWorldMap();
         if (worlds.containsKey(levelKey)) {
@@ -270,6 +464,7 @@ public final class PocketDimensionManager {
         Registry<NoiseGeneratorSettings> noiseSettings = server.registryAccess().registryOrThrow(Registry.NOISE_GENERATOR_SETTINGS_REGISTRY);
         Registry<DimensionType> dimensionTypes = server.registryAccess().registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY);
 
+        GenerationProfile profile = generationProfile(biome);
         long seed = server.getWorldData().worldGenSettings().seed() ^ UUID.randomUUID().getMostSignificantBits();
         FixedBiomeSource biomeSource = new FixedBiomeSource(biome);
         BoundedNoiseBasedChunkGenerator generator = new BoundedNoiseBasedChunkGenerator(
@@ -278,12 +473,21 @@ public final class PocketDimensionManager {
                 biomeSource,
                 biome,
                 seed,
-                noiseSettings.getHolderOrThrow(NoiseGeneratorSettings.OVERWORLD),
+                noiseSettings.getHolderOrThrow(profile.noiseSettings()),
                 MIN_POCKET_CHUNK,
                 MAX_POCKET_CHUNK
         );
-        LevelStem stem = new LevelStem(dimensionTypes.getHolderOrThrow(DimensionType.OVERWORLD_LOCATION), generator);
+        LevelStem stem = new LevelStem(dimensionTypes.getHolderOrThrow(profile.dimensionType()), generator);
         ResourceKey<LevelStem> stemKey = ResourceKey.create(Registry.LEVEL_STEM_REGISTRY, levelKey.location());
+
+        String biomeName = biome.unwrapKey()
+                .map(key -> key.location().toString())
+                .orElse("<direct-biome>");
+        BiomePockets.LOGGER.info(
+                "Creating {} pocket for {} using {} noise and dimension type",
+                levelKey.location(),
+                biomeName,
+                profile.name());
 
         WorldData worldData = server.getWorldData();
         WorldGenSettings worldGenSettings = worldData.worldGenSettings();
@@ -324,6 +528,38 @@ public final class PocketDimensionManager {
         return newLevel;
     }
 
+    @SuppressWarnings({"deprecation", "removal"})
+    private static GenerationProfile generationProfile(Holder<Biome> biome) {
+        boolean isNether = biome.is(BiomeTags.IS_NETHER);
+        boolean isEnd = biome.is(Tags.Biomes.IS_END);
+
+        Optional<ResourceKey<Biome>> biomeKey = biome.unwrapKey();
+        if (biomeKey.isPresent()) {
+            // BiomeDictionary is deprecated in favor of tags, but it remains useful
+            // in 1.18.2 as a compatibility fallback for mods that registered their
+            // dimension classification there instead of the newer Forge tags.
+            isNether = isNether || BiomeDictionary.hasType(biomeKey.get(), BiomeDictionary.Type.NETHER);
+            isEnd = isEnd || BiomeDictionary.hasType(biomeKey.get(), BiomeDictionary.Type.END);
+        }
+
+        if (isEnd) {
+            return new GenerationProfile(
+                    NoiseGeneratorSettings.END,
+                    DimensionType.END_LOCATION,
+                    "End");
+        }
+        if (isNether) {
+            return new GenerationProfile(
+                    NoiseGeneratorSettings.NETHER,
+                    DimensionType.NETHER_LOCATION,
+                    "Nether");
+        }
+        return new GenerationProfile(
+                NoiseGeneratorSettings.OVERWORLD,
+                DimensionType.OVERWORLD_LOCATION,
+                "Overworld");
+    }
+
     @SuppressWarnings("deprecation")
     private static void teardown(MinecraftServer server, ResourceKey<Level> key, PocketRecord record, boolean force) {
         if (!OWNED.containsKey(key) || !isPocketKey(key)) {
@@ -333,6 +569,7 @@ public final class PocketDimensionManager {
         ServerLevel level = server.getLevel(key);
         if (level == null) {
             OWNED.remove(key);
+            clearReturnReservations(key);
             return;
         }
 
@@ -378,6 +615,7 @@ public final class PocketDimensionManager {
         removeLevelStem(server, key);
         server.markWorldsDirty();
         OWNED.remove(key);
+        clearReturnReservations(key);
         deleteOwnedFolder(server, key, record.folder());
     }
 
@@ -460,5 +698,18 @@ public final class PocketDimensionManager {
         }
     }
 
+    private record GenerationProfile(
+            ResourceKey<NoiseGeneratorSettings> noiseSettings,
+            ResourceKey<DimensionType> dimensionType,
+            String name) { }
+
     private record PocketRecord(ResourceLocation biome, Path folder) { }
+
+    private record PocketReturnPoint(
+            ResourceKey<Level> dimension,
+            double x,
+            double y,
+            double z,
+            float yRot,
+            float xRot) { }
 }
