@@ -12,6 +12,7 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.common.BiomeDictionary;
 import net.minecraftforge.common.Tags;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -111,9 +112,10 @@ public final class PocketWorldSafetyEvents {
                 spawn = buildCenterPlatform(level, end ? Blocks.END_STONE.defaultBlockState() : Blocks.STONE.defaultBlockState());
             }
         } else {
-            // Normal Overworld/End-style biomes always select the highest solid ground
-            // in the exact center column. A blocked player space is corrected upward;
-            // it never causes the search to descend into a cave.
+            // Normal Overworld/End-style biomes always use the actual top of the
+            // center column. Water/lava at that surface is replaced in-place by a
+            // platform instead of treating the column as missing and falling back to
+            // an arbitrary midpoint Y.
             spawn = findHighestCenterGround(level);
             if (spawn == null) {
                 spawn = buildCenterPlatform(level, end ? Blocks.END_STONE.defaultBlockState() : Blocks.STONE.defaultBlockState());
@@ -140,38 +142,46 @@ public final class PocketWorldSafetyEvents {
     }
 
     /**
-     * Normal Overworld/End policy: first select the highest solid/sturdy ground block
-     * at x=0,z=0 without considering whether the two player blocks above it are clear.
-     * Only after that ground has been chosen do we perform the safety correction, and
-     * that correction can move upward only. It can never turn a surface spawn into an
-     * underground/cave spawn.
+     * Normal Overworld/End policy: use the top of the exact center column, including
+     * the natural fluid surface. MOTION_BLOCKING_NO_LEAVES deliberately ignores tree
+     * leaves while still treating water/lava as the surface. If that top surface is
+     * not standable, replace the surface itself with a 3x3 platform. Only a genuinely
+     * empty/void column returns null and reaches the arbitrary-height void fallback.
      */
     private static BlockPos findHighestCenterGround(ServerLevel level) {
-        int minFloorY = level.getMinBuildHeight();
-        int maxFloorY = level.getMaxBuildHeight() - 3;
+        int minFeetY = level.getMinBuildHeight() + 1;
+        int maxFeetY = level.getMaxBuildHeight() - 2;
+        int feetY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
 
-        for (int floorY = maxFloorY; floorY >= minFloorY; floorY--) {
-            BlockPos floor = new BlockPos(0, floorY, 0);
-            BlockState floorState = level.getBlockState(floor);
-            if (!level.getFluidState(floor).isEmpty()
-                    || !floorState.isFaceSturdy(level, floor, net.minecraft.core.Direction.UP)) {
-                continue;
-            }
-
-            return moveUpToClearPlayerSpace(level, floor.above());
+        if (feetY < minFeetY || feetY > maxFeetY) {
+            return null;
         }
-        return null;
+
+        BlockPos floor = new BlockPos(0, feetY - 1, 0);
+        BlockState floorState = level.getBlockState(floor);
+        boolean fluidSurface = !level.getFluidState(floor).isEmpty();
+        boolean sturdySurface = floorState.isFaceSturdy(level, floor, net.minecraft.core.Direction.UP);
+
+        if (fluidSurface || !sturdySurface) {
+            BlockState platformState = level.dimensionTypeRegistration().is(DimensionType.END_LOCATION)
+                    ? Blocks.END_STONE.defaultBlockState()
+                    : Blocks.STONE.defaultBlockState();
+            buildSurfacePlatform(level, feetY - 1, platformState);
+        }
+
+        return new BlockPos(0, feetY, 0);
     }
 
-    private static BlockPos moveUpToClearPlayerSpace(ServerLevel level, BlockPos initialFeet) {
-        int maxFeetY = level.getMaxBuildHeight() - 2;
-        for (int y = initialFeet.getY(); y <= maxFeetY; y++) {
-            BlockPos feet = new BlockPos(initialFeet.getX(), y, initialFeet.getZ());
-            if (isPlayerSpaceClear(level, feet) && isPlayerSpaceClear(level, feet.above())) {
-                return feet;
+    /**
+     * Replaces the natural center surface at the chosen Y instead of inventing a new
+     * platform at world midpoint. This is primarily for water/lava surface spawns.
+     */
+    private static void buildSurfacePlatform(ServerLevel level, int floorY, BlockState floorState) {
+        for (int z = -1; z <= 1; z++) {
+            for (int x = -1; x <= 1; x++) {
+                level.setBlockAndUpdate(new BlockPos(x, floorY, z), floorState);
             }
         }
-        return null;
     }
 
     /**
@@ -325,6 +335,10 @@ public final class PocketWorldSafetyEvents {
         return new BlockPos(0, minShellY + 1, 0);
     }
 
+    /**
+     * Genuine void fallback only. Normal fluid surfaces are handled in-place by
+     * buildSurfacePlatform and should never reach this method.
+     */
     private static BlockPos buildCenterPlatform(ServerLevel level, BlockState floorState) {
         int minFeetY = level.getMinBuildHeight() + 1;
         int maxFeetY = level.getMaxBuildHeight() - 2;
