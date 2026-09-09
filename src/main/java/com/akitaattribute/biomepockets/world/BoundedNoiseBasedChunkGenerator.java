@@ -32,9 +32,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
 /**
- * Overworld-style noise generator that only produces real worldgen in the configured
- * pocket chunk square. Minecraft may still request dependency/view-distance chunks,
- * but those chunks remain empty instead of producing additional terrain.
+ * Noise generator that produces real worldgen only in the configured 3x3 pocket and
+ * surrounds it with one complete chunk of solid barrier blocks on every horizontal
+ * side. Chunks outside that 5x5 prepared square remain void.
  *
  * Pocket biome population intentionally bypasses ChunkGenerator's normal multi-biome
  * feature-selection/indexing layer. A pocket already has one exact selected biome, so
@@ -46,6 +46,8 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     private final long pocketSeed;
     private final int minPocketChunk;
     private final int maxPocketChunk;
+    private final int minBarrierChunk;
+    private final int maxBarrierChunk;
     private boolean loggedFeaturePlan;
 
     public BoundedNoiseBasedChunkGenerator(
@@ -62,13 +64,24 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         this.pocketSeed = seed;
         this.minPocketChunk = minPocketChunk;
         this.maxPocketChunk = maxPocketChunk;
+        this.minBarrierChunk = minPocketChunk - 1;
+        this.maxBarrierChunk = maxPocketChunk + 1;
     }
 
     private boolean isPocketChunk(ChunkAccess chunk) {
-        int x = chunk.getPos().x;
-        int z = chunk.getPos().z;
-        return x >= minPocketChunk && x <= maxPocketChunk
-                && z >= minPocketChunk && z <= maxPocketChunk;
+        return isPocketChunk(chunk.getPos());
+    }
+
+    private boolean isPocketChunk(ChunkPos pos) {
+        return pos.x >= minPocketChunk && pos.x <= maxPocketChunk
+                && pos.z >= minPocketChunk && pos.z <= maxPocketChunk;
+    }
+
+    private boolean isBarrierChunk(ChunkAccess chunk) {
+        ChunkPos pos = chunk.getPos();
+        return !isPocketChunk(pos)
+                && pos.x >= minBarrierChunk && pos.x <= maxBarrierChunk
+                && pos.z >= minBarrierChunk && pos.z <= maxBarrierChunk;
     }
 
     @Override
@@ -77,10 +90,39 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
             Blender blender,
             StructureFeatureManager structureFeatureManager,
             ChunkAccess chunk) {
-        if (!isPocketChunk(chunk)) {
-            return CompletableFuture.completedFuture(chunk);
+        if (isPocketChunk(chunk)) {
+            return super.fillFromNoise(executor, blender, structureFeatureManager, chunk);
         }
-        return super.fillFromNoise(executor, blender, structureFeatureManager, chunk);
+        if (isBarrierChunk(chunk)) {
+            fillBarrierChunk(chunk);
+        }
+        return CompletableFuture.completedFuture(chunk);
+    }
+
+    /**
+     * Fills each of the 16 chunks surrounding the playable 3x3 area from build bottom
+     * to build top. Doing this directly on ChunkAccess during worldgen is much cheaper
+     * than issuing ~1.5 million live-world block updates, and it ensures neighboring
+     * barrier blocks already exist when edge trees/features evaluate placement.
+     */
+    private void fillBarrierChunk(ChunkAccess chunk) {
+        ChunkPos chunkPos = chunk.getPos();
+        int minX = chunkPos.getMinBlockX();
+        int maxX = chunkPos.getMaxBlockX();
+        int minZ = chunkPos.getMinBlockZ();
+        int maxZ = chunkPos.getMaxBlockZ();
+        int minY = chunk.getMinBuildHeight();
+        int maxY = chunk.getMaxBuildHeight();
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+
+        for (int y = minY; y < maxY; y++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int x = minX; x <= maxX; x++) {
+                    chunk.setBlockState(pos.set(x, y, z), Blocks.BARRIER.defaultBlockState(), false);
+                }
+            }
+        }
+        chunk.setUnsaved(true);
     }
 
     @Override
@@ -153,10 +195,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
             }
         }
 
-        // Build the physical pocket boundary in the worldgen worker as part of the
-        // FEATURES pass. This avoids tens of thousands of ServerLevel#setBlock calls
-        // on the main server thread before teleporting the player.
-        buildBarrierForChunk(level, chunkPos);
         chunk.setUnsaved(true);
 
         if (chunkPos.x == 0 && chunkPos.z == 0) {
@@ -171,54 +209,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
                     chunkPos.z,
                     attempted,
                     placed);
-        }
-    }
-
-    private void buildBarrierForChunk(WorldGenLevel level, ChunkPos chunkPos) {
-        int minBarrierBlock = minPocketChunk * 16 - 1;
-        int maxBarrierBlock = (maxPocketChunk + 1) * 16;
-        int minY = level.getMinBuildHeight();
-        int maxY = level.getMaxBuildHeight();
-        int minX = chunkPos.getMinBlockX();
-        int maxX = chunkPos.getMaxBlockX();
-        int minZ = chunkPos.getMinBlockZ();
-        int maxZ = chunkPos.getMaxBlockZ();
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-
-        for (int y = minY; y < maxY; y++) {
-            if (chunkPos.x == minPocketChunk) {
-                for (int z = minZ; z <= maxZ; z++) {
-                    level.setBlock(pos.set(minBarrierBlock, y, z), Blocks.BARRIER.defaultBlockState(), 2);
-                }
-            }
-            if (chunkPos.x == maxPocketChunk) {
-                for (int z = minZ; z <= maxZ; z++) {
-                    level.setBlock(pos.set(maxBarrierBlock, y, z), Blocks.BARRIER.defaultBlockState(), 2);
-                }
-            }
-            if (chunkPos.z == minPocketChunk) {
-                for (int x = minX; x <= maxX; x++) {
-                    level.setBlock(pos.set(x, y, minBarrierBlock), Blocks.BARRIER.defaultBlockState(), 2);
-                }
-            }
-            if (chunkPos.z == maxPocketChunk) {
-                for (int x = minX; x <= maxX; x++) {
-                    level.setBlock(pos.set(x, y, maxBarrierBlock), Blocks.BARRIER.defaultBlockState(), 2);
-                }
-            }
-
-            if (chunkPos.x == minPocketChunk && chunkPos.z == minPocketChunk) {
-                level.setBlock(pos.set(minBarrierBlock, y, minBarrierBlock), Blocks.BARRIER.defaultBlockState(), 2);
-            }
-            if (chunkPos.x == minPocketChunk && chunkPos.z == maxPocketChunk) {
-                level.setBlock(pos.set(minBarrierBlock, y, maxBarrierBlock), Blocks.BARRIER.defaultBlockState(), 2);
-            }
-            if (chunkPos.x == maxPocketChunk && chunkPos.z == minPocketChunk) {
-                level.setBlock(pos.set(maxBarrierBlock, y, minBarrierBlock), Blocks.BARRIER.defaultBlockState(), 2);
-            }
-            if (chunkPos.x == maxPocketChunk && chunkPos.z == maxPocketChunk) {
-                level.setBlock(pos.set(maxBarrierBlock, y, maxBarrierBlock), Blocks.BARRIER.defaultBlockState(), 2);
-            }
         }
     }
 
