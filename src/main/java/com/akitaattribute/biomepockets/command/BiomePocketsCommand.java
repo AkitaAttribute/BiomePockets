@@ -33,6 +33,7 @@ import java.util.Map;
 public final class BiomePocketsCommand {
     private static final String TRANSPORTER = "biome_transporter";
     private static final String SELECTOR = "biome_transporter_selector";
+    private static final String MANAGER = "pocket_biome_manager";
     private static final SimpleCommandExceptionType UNKNOWN_ITEM = new SimpleCommandExceptionType(
             new TextComponent("Unknown BiomePockets item."));
 
@@ -45,7 +46,7 @@ public final class BiomePocketsCommand {
                         .executes(context -> listDimensions(context.getSource())))
                 .then(Commands.argument("item", StringArgumentType.word())
                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(
-                                new String[] { TRANSPORTER, SELECTOR }, builder))
+                                new String[] { TRANSPORTER, SELECTOR, MANAGER }, builder))
                         .executes(context -> giveItem(
                                 context.getSource().getPlayerOrException(),
                                 StringArgumentType.getString(context, "item")))));
@@ -97,6 +98,8 @@ public final class BiomePocketsCommand {
             registryObject = ModItems.BIOME_TRANSPORTER;
         } else if (SELECTOR.equals(itemName)) {
             registryObject = ModItems.BIOME_TRANSPORTER_SELECTOR;
+        } else if (MANAGER.equals(itemName)) {
+            registryObject = ModItems.POCKET_BIOME_MANAGER;
         } else {
             throw UNKNOWN_ITEM.create();
         }
