@@ -43,6 +43,7 @@ import java.util.concurrent.Executor;
  */
 public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenerator {
     private final Holder<Biome> pocketBiome;
+    private final long pocketSeed;
     private final int minPocketChunk;
     private final int maxPocketChunk;
     private boolean loggedFeaturePlan;
@@ -58,6 +59,7 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
             int maxPocketChunk) {
         super(structureSets, noiseParameters, biomeSource, seed, settings);
         this.pocketBiome = pocketBiome;
+        this.pocketSeed = seed;
         this.minPocketChunk = minPocketChunk;
         this.maxPocketChunk = maxPocketChunk;
     }
@@ -130,13 +132,12 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         }
 
         ChunkPos chunkPos = chunk.getPos();
-        BlockPos origin = new BlockPos(
-                chunkPos.getMinBlockX(),
-                level.getMinBuildHeight(),
-                chunkPos.getMinBlockZ());
+        // Match vanilla ChunkPos#getWorldPosition(): decoration starts at the chunk's
+        // minimum X/Z with Y=0, even in dimensions whose minimum build height is -64.
+        BlockPos origin = new BlockPos(chunkPos.getMinBlockX(), 0, chunkPos.getMinBlockZ());
 
         WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
-        long decorationSeed = random.setDecorationSeed(level.getSeed(), origin.getX(), origin.getZ());
+        long decorationSeed = random.setDecorationSeed(pocketSeed, origin.getX(), origin.getZ());
 
         int attempted = 0;
         int placed = 0;
@@ -158,12 +159,19 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         buildBarrierForChunk(level, chunkPos);
         chunk.setUnsaved(true);
 
-        BiomePockets.LOGGER.debug(
-                "Pocket chunk {},{} attempted {} placed features; {} reported placement",
-                chunkPos.x,
-                chunkPos.z,
-                attempted,
-                placed);
+        if (chunkPos.x == 0 && chunkPos.z == 0) {
+            BiomePockets.LOGGER.info(
+                    "Pocket center chunk attempted {} placed features; {} reported placement",
+                    attempted,
+                    placed);
+        } else {
+            BiomePockets.LOGGER.debug(
+                    "Pocket chunk {},{} attempted {} placed features; {} reported placement",
+                    chunkPos.x,
+                    chunkPos.z,
+                    attempted,
+                    placed);
+        }
     }
 
     private void buildBarrierForChunk(WorldGenLevel level, ChunkPos chunkPos) {
