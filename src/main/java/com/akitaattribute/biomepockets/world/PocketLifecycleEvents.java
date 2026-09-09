@@ -2,7 +2,6 @@ package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
@@ -18,16 +17,6 @@ import net.minecraftforge.fml.common.Mod;
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketLifecycleEvents {
     private PocketLifecycleEvents() { }
-
-    @SubscribeEvent
-    public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
-        if (event.phase == TickEvent.Phase.END && event.player instanceof ServerPlayer player) {
-            // Keep the owner's latest exact coordinate in memory while inside their
-            // claimed pocket. The record is flushed on departure/shutdown instead of
-            // writing a properties file every tick.
-            PocketClaimManager.trackCurrentPocketPosition(player);
-        }
-    }
 
     @SubscribeEvent
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
@@ -47,7 +36,9 @@ public final class PocketLifecycleEvents {
     @SubscribeEvent
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
-            PocketClaimManager.trackCurrentPocketPosition(player);
+            // If logout occurs inside the player's permanent pocket, preserve that
+            // exact location as the next Visit destination.
+            PocketClaimManager.rememberCurrentPocketPosition(player);
             PocketClaimManager.saveAll(player.getServer());
 
             // Both reservations are non-destructive. The in-memory copy handles a
