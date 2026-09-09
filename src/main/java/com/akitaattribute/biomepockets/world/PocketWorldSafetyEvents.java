@@ -70,8 +70,11 @@ public final class PocketWorldSafetyEvents {
             return;
         }
 
-        MinecraftServer server = player.getServer();
-        server.execute(() -> applyInitialSpawn(server, player.getUUID(), destination));
+        // Forge fires PlayerChangedDimensionEvent after the player has already been
+        // installed in the destination ServerLevel. Reposition immediately in this
+        // event rather than scheduling another tick, so the client never spends a
+        // frame at the manager's provisional arrival point.
+        applyInitialSpawn(player.getServer(), player.getUUID(), destination);
     }
 
     private static void applyInitialSpawn(
