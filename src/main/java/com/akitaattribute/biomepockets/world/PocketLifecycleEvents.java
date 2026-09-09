@@ -11,8 +11,7 @@ import net.minecraftforge.fml.common.Mod;
 /**
  * Pocket lifetime is tied to an explicit dimension departure, not player connection
  * state. Disconnecting because of logout, a dropped connection, or a client crash
- * must leave the pocket intact so vanilla player data can restore the player to the
- * same dimension and coordinates on reconnect.
+ * reserves the pocket and the exact player position for restoration on reconnect.
  *
  * Full server process persistence is still handled separately by the existing
  * startup/shutdown cleanup path; runtime pocket generators are not yet serialized as
@@ -29,9 +28,21 @@ public final class PocketLifecycleEvents {
         }
     }
 
-    // Deliberately no PlayerLoggedOutEvent teardown. A disconnect is not an explicit
-    // departure from the pocket and the player must be able to reconnect where they
-    // were standing.
+    @SubscribeEvent
+    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getPlayer() instanceof ServerPlayer player) {
+            // This records a return reservation only. It deliberately does not trigger
+            // teardown, even when the player is the only occupant of the pocket.
+            PocketDimensionManager.rememberDisconnect(player);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getPlayer() instanceof ServerPlayer player) {
+            PocketDimensionManager.restoreAfterLogin(player);
+        }
+    }
 
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
