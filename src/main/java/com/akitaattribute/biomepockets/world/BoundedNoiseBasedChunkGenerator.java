@@ -20,6 +20,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.VineBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
@@ -34,7 +35,6 @@ import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Noise generator that produces real worldgen only in the configured 3x3 pocket and
@@ -53,8 +53,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     private final int maxPocketChunk;
     private final int minBarrierChunk;
     private final int maxBarrierChunk;
-    private final int expectedPocketChunks;
-    private final AtomicInteger decoratedPocketChunks = new AtomicInteger();
     private boolean loggedFeaturePlan;
 
     public BoundedNoiseBasedChunkGenerator(
@@ -73,8 +71,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         this.maxPocketChunk = maxPocketChunk;
         this.minBarrierChunk = minPocketChunk - 1;
         this.maxBarrierChunk = maxPocketChunk + 1;
-        int pocketWidth = maxPocketChunk - minPocketChunk + 1;
-        this.expectedPocketChunks = pocketWidth * pocketWidth;
     }
 
     private boolean isPocketChunk(ChunkAccess chunk) {
@@ -86,7 +82,7 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
                 && pos.z >= minPocketChunk && pos.z <= maxPocketChunk;
     }
 
-    private boolean isBarrierChunk(ChunkAccess chunk) {
+    public boolean isBarrierChunk(ChunkAccess chunk) {
         ChunkPos pos = chunk.getPos();
         return !isPocketChunk(pos)
                 && pos.x >= minBarrierChunk && pos.x <= maxBarrierChunk
@@ -132,6 +128,67 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
             }
         }
         chunk.setUnsaved(true);
+    }
+
+    /**
+     * FEATURES has a one-chunk write radius, so any feature escaping the playable
+     * 3x3 can only damage the surrounding barrier ring. Some features (notably lakes
+     * and End islands) write directly and can replace barrier blocks. Once all nine
+     * playable chunks have finished FEATURES/FULL, the manager calls this method on
+     * the 16 ring chunks and the barrier becomes authoritative again.
+     *
+     * Untouched sections remain palette-compressed as all-barrier. maybeHas lets us
+     * skip those sections without scanning their 4096 positions, so cleanup cost is
+     * concentrated only in sections that a feature actually modified.
+     */
+    public int repairBarrierChunk(ChunkAccess chunk) {
+        if (!isBarrierChunk(chunk)) {
+            return 0;
+        }
+
+        BlockState barrier = Blocks.BARRIER.defaultBlockState();
+        int repaired = 0;
+        LevelChunkSection[] sections = chunk.getSections();
+        ChunkPos chunkPos = chunk.getPos();
+
+        for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+            LevelChunkSection section = sections[sectionIndex];
+            if (!section.maybeHas(state -> !state.is(Blocks.BARRIER))) {
+                continue;
+            }
+
+            int sectionY = chunk.getSectionYFromSectionIndex(sectionIndex);
+            int baseY = sectionY << 4;
+            section.acquire();
+            try {
+                for (int localY = 0; localY < 16; localY++) {
+                    for (int localZ = 0; localZ < 16; localZ++) {
+                        for (int localX = 0; localX < 16; localX++) {
+                            BlockState oldState = section.getBlockState(localX, localY, localZ);
+                            if (oldState.is(Blocks.BARRIER)) {
+                                continue;
+                            }
+
+                            section.setBlockState(localX, localY, localZ, barrier, false);
+                            if (oldState.hasBlockEntity()) {
+                                chunk.removeBlockEntity(new BlockPos(
+                                        chunkPos.getMinBlockX() + localX,
+                                        baseY + localY,
+                                        chunkPos.getMinBlockZ() + localZ));
+                            }
+                            repaired++;
+                        }
+                    }
+                }
+            } finally {
+                section.release();
+            }
+        }
+
+        if (repaired > 0) {
+            chunk.setUnsaved(true);
+        }
+        return repaired;
     }
 
     @Override
@@ -212,15 +269,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
 
         chunk.setUnsaved(true);
 
-        // Vines can regard barrier blocks as valid support and therefore appear as
-        // floating fragments on the otherwise invisible pocket wall. Wait until the
-        // final one of the nine FEATURES callbacks completes, then remove only vines
-        // occupying the playable perimeter whose outward neighbor is a barrier. This
-        // keeps vines attached to normal terrain/trees everywhere else intact.
-        if (decoratedPocketChunks.incrementAndGet() == expectedPocketChunks) {
-            removeBarrierSupportedVines(level);
-        }
-
         if (chunkPos.x == 0 && chunkPos.z == 0) {
             BiomePockets.LOGGER.info(
                     "Pocket center chunk attempted {} placed features; {} reported placement; {} End boss features suppressed",
@@ -238,7 +286,12 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         }
     }
 
-    private void removeBarrierSupportedVines(WorldGenLevel level) {
+    /**
+     * Remove only vines occupying the playable perimeter whose outward support block
+     * is the barrier ring. Run after barrier repair so a feature that temporarily
+     * replaced the support block cannot hide one of these wall vines from cleanup.
+     */
+    public int removeBarrierSupportedVines(WorldGenLevel level) {
         int minBlock = minPocketChunk * 16;
         int maxBlock = ((maxPocketChunk + 1) * 16) - 1;
         int minY = level.getMinBuildHeight();
@@ -255,12 +308,7 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
                 removed += removeBarrierSupportedVine(level, x, y, maxBlock, Direction.SOUTH);
             }
         }
-
-        if (removed > 0) {
-            BiomePockets.LOGGER.debug(
-                    "Removed {} vine blocks supported by the pocket barrier wall",
-                    removed);
-        }
+        return removed;
     }
 
     private static int removeBarrierSupportedVine(
