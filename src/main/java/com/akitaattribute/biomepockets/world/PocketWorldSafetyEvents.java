@@ -72,8 +72,7 @@ public final class PocketWorldSafetyEvents {
 
         // Forge fires PlayerChangedDimensionEvent after the player has already been
         // installed in the destination ServerLevel. Reposition immediately in this
-        // event rather than scheduling another tick, so the client never spends a
-        // frame at the manager's provisional arrival point.
+        // event rather than scheduling another tick.
         applyInitialSpawn(player.getServer(), player.getUUID(), destination);
     }
 
@@ -102,15 +101,20 @@ public final class PocketWorldSafetyEvents {
                 spawn = carveProtectedNetherChamber(level);
             }
         } else if (underground) {
+            // Cave biomes are the only non-Nether profile where an underground
+            // opening is intentionally preferred.
             spawn = findCaveOpeningNearCenter(level);
             if (spawn == null) {
-                spawn = findHighestCenterSurface(level);
+                spawn = findHighestCenterGround(level);
             }
             if (spawn == null) {
                 spawn = buildCenterPlatform(level, end ? Blocks.END_STONE.defaultBlockState() : Blocks.STONE.defaultBlockState());
             }
         } else {
-            spawn = findHighestCenterSurface(level);
+            // Normal Overworld/End-style biomes always select the highest solid ground
+            // in the exact center column. A blocked player space is corrected upward;
+            // it never causes the search to descend into a cave.
+            spawn = findHighestCenterGround(level);
             if (spawn == null) {
                 spawn = buildCenterPlatform(level, end ? Blocks.END_STONE.defaultBlockState() : Blocks.STONE.defaultBlockState());
             }
@@ -136,15 +140,35 @@ public final class PocketWorldSafetyEvents {
     }
 
     /**
-     * Normal Overworld/End policy: center of the pocket, highest standable location.
-     * This is intentionally a top-down scan rather than a general cave search.
+     * Normal Overworld/End policy: first select the highest solid/sturdy ground block
+     * at x=0,z=0 without considering whether the two player blocks above it are clear.
+     * Only after that ground has been chosen do we perform the safety correction, and
+     * that correction can move upward only. It can never turn a surface spawn into an
+     * underground/cave spawn.
      */
-    private static BlockPos findHighestCenterSurface(ServerLevel level) {
-        int minY = level.getMinBuildHeight() + 1;
-        int maxY = level.getMaxBuildHeight() - 2;
-        for (int y = maxY; y >= minY; y--) {
-            if (isSafeStandingPosition(level, 0, y, 0, false)) {
-                return new BlockPos(0, y, 0);
+    private static BlockPos findHighestCenterGround(ServerLevel level) {
+        int minFloorY = level.getMinBuildHeight();
+        int maxFloorY = level.getMaxBuildHeight() - 3;
+
+        for (int floorY = maxFloorY; floorY >= minFloorY; floorY--) {
+            BlockPos floor = new BlockPos(0, floorY, 0);
+            BlockState floorState = level.getBlockState(floor);
+            if (!level.getFluidState(floor).isEmpty()
+                    || !floorState.isFaceSturdy(level, floor, net.minecraft.core.Direction.UP)) {
+                continue;
+            }
+
+            return moveUpToClearPlayerSpace(level, floor.above());
+        }
+        return null;
+    }
+
+    private static BlockPos moveUpToClearPlayerSpace(ServerLevel level, BlockPos initialFeet) {
+        int maxFeetY = level.getMaxBuildHeight() - 2;
+        for (int y = initialFeet.getY(); y <= maxFeetY; y++) {
+            BlockPos feet = new BlockPos(initialFeet.getX(), y, initialFeet.getZ());
+            if (isPlayerSpaceClear(level, feet) && isPlayerSpaceClear(level, feet.above())) {
+                return feet;
             }
         }
         return null;
@@ -198,9 +222,6 @@ public final class PocketWorldSafetyEvents {
     }
 
     private static BlockPos findCaveAtY(ServerLevel level, int y) {
-        // Keep cave-spawn attempts inside the center chunk and as close to x/z=0 as
-        // possible. Radius seven reaches most of that chunk without approaching the
-        // surrounding barrier ring.
         for (int radius = 0; radius <= 7; radius++) {
             for (int x = -radius; x <= radius; x++) {
                 BlockPos candidate = caveCandidate(level, x, y, -radius);
