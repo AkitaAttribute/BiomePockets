@@ -9,13 +9,10 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 /**
- * Pocket lifetime is tied to an explicit dimension departure, not player connection
- * state. Disconnecting because of logout, a dropped connection, or a client crash
- * reserves the pocket and the exact player position for restoration on reconnect.
- *
- * Full server process persistence is still handled separately by the existing
- * startup/shutdown cleanup path; runtime pocket generators are not yet serialized as
- * persistent custom dimension definitions.
+ * Pocket lifetime is tied to an explicit dimension departure, not connection or
+ * process lifetime. Disconnects preserve exact return coordinates, while orderly
+ * server/world shutdown preserves the pocket folder and reconstructs its bounded
+ * runtime generator on the next start.
  */
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketLifecycleEvents {
@@ -24,6 +21,7 @@ public final class PocketLifecycleEvents {
     @SubscribeEvent
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
+            PocketPersistenceManager.handleDimensionChange(player, event.getFrom(), event.getTo());
             PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
         }
     }
@@ -31,9 +29,11 @@ public final class PocketLifecycleEvents {
     @SubscribeEvent
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
-            // This records a return reservation only. It deliberately does not trigger
-            // teardown, even when the player is the only occupant of the pocket.
+            // Both reservations are non-destructive. The in-memory copy handles a
+            // normal reconnect; the disk-backed copy survives integrated/dedicated
+            // server shutdown and process restart.
             PocketDimensionManager.rememberDisconnect(player);
+            PocketPersistenceManager.rememberDisconnect(player);
         }
     }
 
@@ -41,16 +41,20 @@ public final class PocketLifecycleEvents {
     public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
             PocketDimensionManager.restoreAfterLogin(player);
+            PocketPersistenceManager.restoreAfterLogin(player);
         }
     }
 
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
-        PocketDimensionManager.cleanupStalePockets(event.getServer());
+        PocketPersistenceManager.recoverPockets(event.getServer());
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
-        PocketDimensionManager.shutdown(event.getServer());
+        // Do not call PocketDimensionManager.shutdown(): that method intentionally
+        // force-teleports players to Overworld and deletes pocket folders. A normal
+        // world/server stop now preserves them instead.
+        PocketPersistenceManager.prepareForShutdown(event.getServer());
     }
 }
