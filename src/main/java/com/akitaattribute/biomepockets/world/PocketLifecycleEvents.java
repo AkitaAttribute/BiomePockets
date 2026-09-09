@@ -2,6 +2,7 @@ package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
@@ -19,16 +20,36 @@ public final class PocketLifecycleEvents {
     private PocketLifecycleEvents() { }
 
     @SubscribeEvent
+    public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END && event.player instanceof ServerPlayer player) {
+            // Keep the owner's latest exact coordinate in memory while inside their
+            // claimed pocket. The record is flushed on departure/shutdown instead of
+            // writing a properties file every tick.
+            PocketClaimManager.trackCurrentPocketPosition(player);
+        }
+    }
+
+    @SubscribeEvent
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
+            PocketClaimManager.handleDimensionChange(player, event.getFrom(), event.getTo());
             PocketPersistenceManager.handleDimensionChange(player, event.getFrom(), event.getTo());
-            PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
+
+            // Claimed pockets are permanent. A temporary pocket saved as a Visit
+            // return destination is also protected until Exit consumes that return.
+            if (!PocketClaimManager.isClaimed(event.getFrom())
+                    && !PocketClaimManager.isProtectedReturnDimension(event.getFrom())) {
+                PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
+            }
         }
     }
 
     @SubscribeEvent
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
+            PocketClaimManager.trackCurrentPocketPosition(player);
+            PocketClaimManager.saveAll(player.getServer());
+
             // Both reservations are non-destructive. The in-memory copy handles a
             // normal reconnect; the disk-backed copy survives integrated/dedicated
             // server shutdown and process restart.
@@ -48,10 +69,13 @@ public final class PocketLifecycleEvents {
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
         PocketPersistenceManager.recoverPockets(event.getServer());
+        PocketClaimManager.load(event.getServer());
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
+        PocketClaimManager.saveAll(event.getServer());
+
         // Do not call PocketDimensionManager.shutdown(): that method intentionally
         // force-teleports players to Overworld and deletes pocket folders. A normal
         // world/server stop now preserves them instead.
