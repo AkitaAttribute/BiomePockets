@@ -75,3 +75,5 @@ gradle build
 ```
 
 GitHub Actions is push-only and follows the same numbered-artifact pattern used by MCMoltenMetals: each branch build uploads a `biome-pockets-<branch-commit-number>.jar` artifact.
+
+The latest code-bearing validation build for this generation path succeeded on commit `f1c2795eead5f64525bc504fb5b41eb784a3208e`, producing `biome-pockets-21.jar`.
