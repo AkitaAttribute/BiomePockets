@@ -70,6 +70,8 @@ public final class PocketDimensionManager {
     // Real terrain exists only in chunks -1..1 in both axes.
     private static final int MIN_POCKET_CHUNK = -1;
     private static final int MAX_POCKET_CHUNK = 1;
+    private static final int MIN_BARRIER_CHUNK = MIN_POCKET_CHUNK - 1;
+    private static final int MAX_BARRIER_CHUNK = MAX_POCKET_CHUNK + 1;
     private static final int MIN_POCKET_BLOCK = MIN_POCKET_CHUNK * 16;
     private static final int MAX_POCKET_BLOCK = ((MAX_POCKET_CHUNK + 1) * 16) - 1;
 
@@ -145,7 +147,7 @@ public final class PocketDimensionManager {
                 return;
             }
 
-            if (throwable != null || !allChunksReachedFull(futures)) {
+            if (throwable != null || !allChunkFuturesSucceeded(futures)) {
                 BiomePockets.LOGGER.error(
                         "Pocket {} failed to finish all nine FULL chunks",
                         levelKey.location(),
@@ -171,8 +173,92 @@ public final class PocketDimensionManager {
                 return;
             }
 
-            // FULL completion means the nine terrain chunks have passed FEATURES and
-            // lighting. Only after that do we locate or construct a safe arrival point.
+            // Features are allowed to write one chunk beyond their source chunk. Some
+            // features (for example lakes and End islands) can therefore overwrite the
+            // barrier blocks created during NOISE. Do not teleport until the full ring
+            // has reached FEATURES and has been repaired after all nine playable FULL
+            // futures have completed.
+            finalizeContainmentAsync(server, pocket, levelKey, record, playerId, ticketOwner);
+        }));
+    }
+
+    private static void finalizeContainmentAsync(
+            MinecraftServer server,
+            ServerLevel pocket,
+            ResourceKey<Level> levelKey,
+            PocketRecord record,
+            UUID playerId,
+            ResourceLocation ticketOwner) {
+        ServerChunkCache chunkSource = pocket.getChunkSource();
+        if (!(chunkSource.getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
+            BiomePockets.LOGGER.error("Pocket {} is no longer using the bounded generator", levelKey.location());
+            removePreparationTickets(pocket, ticketOwner);
+            teardown(server, levelKey, record, false);
+            return;
+        }
+
+        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> barrierFutures =
+                new ArrayList<>(16);
+        for (int chunkX = MIN_BARRIER_CHUNK; chunkX <= MAX_BARRIER_CHUNK; chunkX++) {
+            for (int chunkZ = MIN_BARRIER_CHUNK; chunkZ <= MAX_BARRIER_CHUNK; chunkZ++) {
+                if (chunkX >= MIN_POCKET_CHUNK && chunkX <= MAX_POCKET_CHUNK
+                        && chunkZ >= MIN_POCKET_CHUNK && chunkZ <= MAX_POCKET_CHUNK) {
+                    continue;
+                }
+                barrierFutures.add(chunkSource.getChunkFuture(chunkX, chunkZ, ChunkStatus.FEATURES, true));
+            }
+        }
+
+        CompletableFuture<Void> allBarrierChunks = CompletableFuture.allOf(
+                barrierFutures.toArray(new CompletableFuture<?>[0]));
+
+        allBarrierChunks.whenComplete((ignored, throwable) -> server.execute(() -> {
+            if (server.getLevel(levelKey) != pocket || OWNED.get(levelKey) != record) {
+                return;
+            }
+
+            if (throwable != null || !allChunkFuturesSucceeded(barrierFutures)) {
+                BiomePockets.LOGGER.error(
+                        "Pocket {} failed while preparing its containment ring",
+                        levelKey.location(),
+                        throwable);
+                removePreparationTickets(pocket, ticketOwner);
+                ServerPlayer currentPlayer = server.getPlayerList().getPlayer(playerId);
+                if (currentPlayer != null) {
+                    currentPlayer.displayClientMessage(
+                            new TextComponent("Biome pocket containment failed. See server log."),
+                            false);
+                }
+                teardown(server, levelKey, record, false);
+                return;
+            }
+
+            int repairedBlocks = 0;
+            for (CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future : barrierFutures) {
+                Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure> result = future.getNow(null);
+                if (result != null && result.left().isPresent()) {
+                    repairedBlocks += generator.repairBarrierChunk(result.left().get());
+                }
+            }
+            int removedVines = generator.removeBarrierSupportedVines(pocket);
+
+            if (repairedBlocks > 0 || removedVines > 0) {
+                BiomePockets.LOGGER.info(
+                        "Finalized pocket {} containment: restored {} barrier blocks and removed {} wall-supported vines",
+                        levelKey.location(),
+                        repairedBlocks,
+                        removedVines);
+            }
+
+            ServerPlayer currentPlayer = server.getPlayerList().getPlayer(playerId);
+            if (currentPlayer == null) {
+                removePreparationTickets(pocket, ticketOwner);
+                teardown(server, levelKey, record, false);
+                return;
+            }
+
+            // Containment is now authoritative. Only after this point may the player
+            // enter the pocket.
             BlockPos spawn = findSafeSpawn(pocket);
             currentPlayer.teleportTo(
                     pocket,
@@ -186,7 +272,7 @@ public final class PocketDimensionManager {
         }));
     }
 
-    private static boolean allChunksReachedFull(
+    private static boolean allChunkFuturesSucceeded(
             List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> futures) {
         for (CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future : futures) {
             Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure> result = future.getNow(null);
