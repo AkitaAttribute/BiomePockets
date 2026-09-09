@@ -2,25 +2,27 @@ package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.google.common.collect.ImmutableList;
+import com.mojang.datafixers.util.Either;
 import com.mojang.serialization.Lifecycle;
-import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.Registry;
 import net.minecraft.core.WritableRegistry;
+import net.minecraft.network.chat.TextComponent;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ChunkHolder;
+import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.level.WorldGenRegion;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.server.level.progress.ChunkProgressListener;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.StructureFeatureManager;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.FixedBiomeSource;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.dimension.DimensionType;
@@ -49,6 +51,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.stream.Stream;
 
@@ -60,16 +63,12 @@ public final class PocketDimensionManager {
     private static final int MIN_POCKET_CHUNK = -1;
     private static final int MAX_POCKET_CHUNK = 1;
 
-    // Vanilla placed features are generated in a centered WorldGenRegion and may
-    // legitimately read/write one neighboring chunk while decorating the center.
-    private static final int DECORATION_REGION_RADIUS = 1;
-
-    // Those chunks cover blocks -16..31. The physical barrier is one block outside
-    // that footprint so all 48x48 terrain blocks remain usable.
-    private static final int MIN_POCKET_BLOCK = MIN_POCKET_CHUNK * 16;
-    private static final int MAX_POCKET_BLOCK = ((MAX_POCKET_CHUNK + 1) * 16) - 1;
-    private static final int MIN_BARRIER_BLOCK = MIN_POCKET_BLOCK - 1;
-    private static final int MAX_BARRIER_BLOCK = MAX_POCKET_BLOCK + 1;
+    // Keep the nine requested chunks resident while their asynchronous FULL futures
+    // progress through terrain, FEATURES, lighting, and final chunk conversion.
+    private static final TicketType<ResourceLocation> PREPARATION_TICKET = TicketType.create(
+            "biomepockets_prepare",
+            Comparator.comparing(ResourceLocation::toString));
+    private static final int PREPARATION_TICKET_RADIUS = 1;
 
     private static final Map<ResourceKey<Level>, PocketRecord> OWNED = new HashMap<>();
 
@@ -93,85 +92,111 @@ public final class PocketDimensionManager {
             OWNED.put(levelKey, record);
             writeOwnershipMarker(levelKey, folder);
 
-            generatePocketArea(pocket);
-            buildBarrierWall(pocket);
-
-            int y = pocket.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
-            y = Math.max(y + 1, pocket.getMinBuildHeight() + 2);
-            player.teleportTo(pocket, 0.5D, y, 0.5D, player.getYRot(), player.getXRot());
+            player.displayClientMessage(
+                    new TextComponent("Preparing " + biomeId + " biome pocket..."),
+                    true);
+            preparePocketAsync(server, pocket, levelKey, record, player.getUUID());
         } catch (Exception exception) {
             BiomePockets.LOGGER.error("Unable to create biome pocket for {}", biomeId, exception);
         }
     }
 
-    private static void generatePocketArea(ServerLevel pocket) {
-        if (!(pocket.getChunkSource().getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
-            throw new IllegalStateException("Pocket level is not using the bounded pocket generator");
-        }
+    private static void preparePocketAsync(
+            MinecraftServer server,
+            ServerLevel pocket,
+            ResourceKey<Level> levelKey,
+            PocketRecord record,
+            UUID playerId) {
+        ServerChunkCache chunkSource = pocket.getChunkSource();
+        ResourceLocation ticketOwner = levelKey.location();
+        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> futures = new ArrayList<>(9);
 
-        // First let the normal chunk pipeline produce all nine chunks through FULL.
-        // Biome decoration is intentionally deferred by BoundedNoiseBasedChunkGenerator
-        // so we can run the actual population stage exactly once after all pocket
-        // terrain exists.
-        List<ChunkAccess> pocketChunks = new ArrayList<>(9);
+        // Submit all nine requests before waiting for any of them. getChunkFuture lets
+        // Minecraft's normal chunk/worldgen executors perform the expensive pipeline
+        // instead of serially blocking the server thread with getChunk(...FULL...).
         for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
             for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
-                ChunkAccess chunk = pocket.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
-                if (chunk == null) {
-                    throw new IllegalStateException("Failed to fully generate pocket chunk " + chunkX + "," + chunkZ);
-                }
-                pocketChunks.add(chunk);
+                ChunkPos pos = new ChunkPos(chunkX, chunkZ);
+                chunkSource.addRegionTicket(
+                        PREPARATION_TICKET,
+                        pos,
+                        PREPARATION_TICKET_RADIUS,
+                        ticketOwner);
+                futures.add(chunkSource.getChunkFuture(chunkX, chunkZ, ChunkStatus.FULL, true));
             }
         }
 
-        // The important part is the WorldGenRegion. Vanilla's FEATURES stage does not
-        // decorate against the raw ServerLevel: it supplies a centered generation
-        // region plus a region-scoped StructureFeatureManager. A raw ServerLevel can
-        // produce terrain and caves correctly while placed features never behave like
-        // normal chunk population, especially for modded biome hooks.
-        for (ChunkAccess chunk : pocketChunks) {
-            WorldGenRegion region = createDecorationRegion(pocket, chunk);
-            StructureFeatureManager structures = pocket.structureFeatureManager().forWorldGenRegion(region);
-            generator.decoratePocketChunk(region, chunk, structures);
-        }
+        CompletableFuture<Void> allChunks = CompletableFuture.allOf(
+                futures.toArray(new CompletableFuture<?>[0]));
+
+        allChunks.whenComplete((ignored, throwable) -> server.execute(() -> {
+            if (server.getLevel(levelKey) != pocket || OWNED.get(levelKey) != record) {
+                return;
+            }
+
+            if (throwable != null || !allChunksReachedFull(futures)) {
+                BiomePockets.LOGGER.error(
+                        "Pocket {} failed to finish all nine FULL chunks",
+                        levelKey.location(),
+                        throwable);
+                removePreparationTickets(pocket, ticketOwner);
+
+                ServerPlayer currentPlayer = server.getPlayerList().getPlayer(playerId);
+                if (currentPlayer != null) {
+                    currentPlayer.displayClientMessage(
+                            new TextComponent("Biome pocket generation failed. See server log."),
+                            false);
+                }
+                teardown(server, levelKey, record, false);
+                return;
+            }
+
+            ServerPlayer currentPlayer = server.getPlayerList().getPlayer(playerId);
+            if (currentPlayer == null) {
+                // The requester never entered this pocket, so there is no progress to
+                // preserve. Do not leave an unreachable prepared dimension behind.
+                removePreparationTickets(pocket, ticketOwner);
+                teardown(server, levelKey, record, false);
+                return;
+            }
+
+            // FULL completion means the nine terrain chunks have passed FEATURES and
+            // lighting. The bounded generator also builds the barrier during FEATURES,
+            // so nothing remains to generate synchronously before teleport.
+            int y = pocket.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
+            y = Math.max(y + 1, pocket.getMinBuildHeight() + 2);
+            currentPlayer.teleportTo(
+                    pocket,
+                    0.5D,
+                    y,
+                    0.5D,
+                    currentPlayer.getYRot(),
+                    currentPlayer.getXRot());
+
+            removePreparationTickets(pocket, ticketOwner);
+        }));
     }
 
-    private static WorldGenRegion createDecorationRegion(ServerLevel pocket, ChunkAccess centerChunk) {
-        int centerX = centerChunk.getPos().x;
-        int centerZ = centerChunk.getPos().z;
-        int diameter = (DECORATION_REGION_RADIUS * 2) + 1;
-        List<ChunkAccess> regionChunks = new ArrayList<>(diameter * diameter);
-
-        // WorldGenRegion stores a square cache in row-major order: Z rows, X columns,
-        // with the center chunk at the middle element. Outside the 3x3 pocket the
-        // bounded generator returns void chunks, which still provide the dependency
-        // neighborhood expected by normal feature placement without exposing terrain.
-        for (int z = centerZ - DECORATION_REGION_RADIUS; z <= centerZ + DECORATION_REGION_RADIUS; z++) {
-            for (int x = centerX - DECORATION_REGION_RADIUS; x <= centerX + DECORATION_REGION_RADIUS; x++) {
-                ChunkAccess dependency = pocket.getChunkSource().getChunk(x, z, ChunkStatus.FULL, true);
-                if (dependency == null) {
-                    throw new IllegalStateException("Failed to prepare decoration dependency chunk " + x + "," + z);
-                }
-                regionChunks.add(dependency);
+    private static boolean allChunksReachedFull(
+            List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> futures) {
+        for (CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future : futures) {
+            Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure> result = future.getNow(null);
+            if (result == null || result.left().isEmpty()) {
+                return false;
             }
         }
-
-        return new WorldGenRegion(pocket, regionChunks, ChunkStatus.FEATURES, DECORATION_REGION_RADIUS);
+        return true;
     }
 
-    private static void buildBarrierWall(ServerLevel pocket) {
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        int minY = pocket.getMinBuildHeight();
-        int maxY = pocket.getMaxBuildHeight();
-
-        for (int y = minY; y < maxY; y++) {
-            for (int x = MIN_BARRIER_BLOCK; x <= MAX_BARRIER_BLOCK; x++) {
-                pocket.setBlock(pos.set(x, y, MIN_BARRIER_BLOCK), Blocks.BARRIER.defaultBlockState(), 2);
-                pocket.setBlock(pos.set(x, y, MAX_BARRIER_BLOCK), Blocks.BARRIER.defaultBlockState(), 2);
-            }
-            for (int z = MIN_POCKET_BLOCK; z <= MAX_POCKET_BLOCK; z++) {
-                pocket.setBlock(pos.set(MIN_BARRIER_BLOCK, y, z), Blocks.BARRIER.defaultBlockState(), 2);
-                pocket.setBlock(pos.set(MAX_BARRIER_BLOCK, y, z), Blocks.BARRIER.defaultBlockState(), 2);
+    private static void removePreparationTickets(ServerLevel pocket, ResourceLocation ticketOwner) {
+        ServerChunkCache chunkSource = pocket.getChunkSource();
+        for (int chunkX = MIN_POCKET_CHUNK; chunkX <= MAX_POCKET_CHUNK; chunkX++) {
+            for (int chunkZ = MIN_POCKET_CHUNK; chunkZ <= MAX_POCKET_CHUNK; chunkZ++) {
+                chunkSource.removeRegionTicket(
+                        PREPARATION_TICKET,
+                        new ChunkPos(chunkX, chunkZ),
+                        PREPARATION_TICKET_RADIUS,
+                        ticketOwner);
             }
         }
     }
@@ -246,10 +271,12 @@ public final class PocketDimensionManager {
         Registry<DimensionType> dimensionTypes = server.registryAccess().registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY);
 
         long seed = server.getWorldData().worldGenSettings().seed() ^ UUID.randomUUID().getMostSignificantBits();
+        FixedBiomeSource biomeSource = new FixedBiomeSource(biome);
         BoundedNoiseBasedChunkGenerator generator = new BoundedNoiseBasedChunkGenerator(
                 structureSets,
                 noiseParameters,
-                new FixedBiomeSource(biome),
+                biomeSource,
+                biome,
                 seed,
                 noiseSettings.getHolderOrThrow(NoiseGeneratorSettings.OVERWORLD),
                 MIN_POCKET_CHUNK,
