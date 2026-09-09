@@ -2,6 +2,7 @@ package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.Registry;
@@ -16,6 +17,8 @@ import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.VineBlock;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
@@ -31,6 +34,7 @@ import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Noise generator that produces real worldgen only in the configured 3x3 pocket and
@@ -49,6 +53,8 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     private final int maxPocketChunk;
     private final int minBarrierChunk;
     private final int maxBarrierChunk;
+    private final int expectedPocketChunks;
+    private final AtomicInteger decoratedPocketChunks = new AtomicInteger();
     private boolean loggedFeaturePlan;
 
     public BoundedNoiseBasedChunkGenerator(
@@ -67,6 +73,8 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         this.maxPocketChunk = maxPocketChunk;
         this.minBarrierChunk = minPocketChunk - 1;
         this.maxBarrierChunk = maxPocketChunk + 1;
+        int pocketWidth = maxPocketChunk - minPocketChunk + 1;
+        this.expectedPocketChunks = pocketWidth * pocketWidth;
     }
 
     private boolean isPocketChunk(ChunkAccess chunk) {
@@ -204,6 +212,15 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
 
         chunk.setUnsaved(true);
 
+        // Vines can regard barrier blocks as valid support and therefore appear as
+        // floating fragments on the otherwise invisible pocket wall. Wait until the
+        // final one of the nine FEATURES callbacks completes, then remove only vines
+        // occupying the playable perimeter whose outward neighbor is a barrier. This
+        // keeps vines attached to normal terrain/trees everywhere else intact.
+        if (decoratedPocketChunks.incrementAndGet() == expectedPocketChunks) {
+            removeBarrierSupportedVines(level);
+        }
+
         if (chunkPos.x == 0 && chunkPos.z == 0) {
             BiomePockets.LOGGER.info(
                     "Pocket center chunk attempted {} placed features; {} reported placement; {} End boss features suppressed",
@@ -219,6 +236,50 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
                     placed,
                     suppressed);
         }
+    }
+
+    private void removeBarrierSupportedVines(WorldGenLevel level) {
+        int minBlock = minPocketChunk * 16;
+        int maxBlock = ((maxPocketChunk + 1) * 16) - 1;
+        int minY = level.getMinBuildHeight();
+        int maxY = level.getMaxBuildHeight();
+        int removed = 0;
+
+        for (int y = minY; y < maxY; y++) {
+            for (int z = minBlock; z <= maxBlock; z++) {
+                removed += removeBarrierSupportedVine(level, minBlock, y, z, Direction.WEST);
+                removed += removeBarrierSupportedVine(level, maxBlock, y, z, Direction.EAST);
+            }
+            for (int x = minBlock + 1; x < maxBlock; x++) {
+                removed += removeBarrierSupportedVine(level, x, y, minBlock, Direction.NORTH);
+                removed += removeBarrierSupportedVine(level, x, y, maxBlock, Direction.SOUTH);
+            }
+        }
+
+        if (removed > 0) {
+            BiomePockets.LOGGER.debug(
+                    "Removed {} vine blocks supported by the pocket barrier wall",
+                    removed);
+        }
+    }
+
+    private static int removeBarrierSupportedVine(
+            WorldGenLevel level,
+            int x,
+            int y,
+            int z,
+            Direction outward) {
+        BlockPos pos = new BlockPos(x, y, z);
+        BlockState state = level.getBlockState(pos);
+        if (!(state.getBlock() instanceof VineBlock)) {
+            return 0;
+        }
+        if (!level.getBlockState(pos.relative(outward)).is(Blocks.BARRIER)) {
+            return 0;
+        }
+
+        level.setBlock(pos, Blocks.AIR.defaultBlockState(), 2);
+        return 1;
     }
 
     /**
