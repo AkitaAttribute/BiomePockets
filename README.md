@@ -4,7 +4,7 @@ First-pass Forge 1.18.2 mod for temporary, single-biome pocket dimensions.
 
 ## Items
 
-- **Biome Transporter**: uses the vanilla blaze rod model. Right-clicking selects a random biome from the server biome registry, creates a new temporary dimension containing only that biome, prepares its playable area, and teleports the player once preparation is complete.
+- **Biome Transporter**: uses the vanilla blaze rod model. Right-clicking selects a random biome from the server biome registry, creates a new temporary dimension containing only that biome, and teleports the player into it.
 - **Biome Transporter Selector**: uses the vanilla bone model. Right-clicking opens a searchable biome list and creates a new pocket for the selected biome.
 
 Biome discovery is registry-driven. There are no hard dependencies on Biomes O' Plenty or Oh The Biomes You'll Go; if their biomes are registered, they appear automatically alongside vanilla and other mod/datapack biomes.
@@ -13,9 +13,9 @@ For testing, `/biomepockets <item>` gives the executing player one of the mod it
 
 `/biomepockets dimensions` reports both the currently loaded `ServerLevel`s and the registered `LevelStem`s, including vanilla and dimensions supplied by other mods.
 
-## Pocket shape and preparation
+## Pocket shape
 
-Each pocket retains the normal 1.18.2 Overworld vertical range and terrain generation, but real terrain is restricted to exactly a 3x3 chunk square:
+Each pocket contains a 3x3 playable terrain square:
 
 ```text
 000
@@ -25,33 +25,37 @@ Each pocket retains the normal 1.18.2 Overworld vertical range and terrain gener
 
 The terrain chunks are `-1..1` on both X and Z, covering blocks `-16..31` on each horizontal axis.
 
-All nine playable chunks are requested together through `ServerChunkCache.getChunkFuture(..., ChunkStatus.FULL, true)` and held with temporary preparation tickets. Minecraft's normal chunk/worldgen executors therefore perform terrain, surfaces, carvers, FEATURES, lighting, and final chunk conversion without serially blocking the main server thread with nine synchronous `getChunk(...FULL...)` calls.
+The complete one-chunk ring surrounding that playable area is generated as solid barrier chunks. In chunk coordinates, the prepared containment square is therefore `-2..2`, with the inner 3x3 using normal terrain and the outer 16 chunks consisting entirely of barrier blocks from build bottom to build top. This prevents trees and other placed features in edge chunks from blooming into neighboring void chunks.
 
-The player remains in their current dimension while generation is in progress and is teleported only after all nine FULL futures have completed successfully. If the requester disconnects before ever entering the new pocket, the unused prepared pocket is torn down rather than left orphaned.
+The barrier ring is written directly into `ChunkAccess` during the ring chunks' NOISE stage rather than through live-world `ServerLevel#setBlock` calls. The nine playable chunks are still the chunks explicitly awaited through `ChunkStatus.FULL`; Minecraft's generation dependency graph prepares their neighboring ring chunks before edge FEATURES can complete, so the barrier exists before vegetation is placed without unnecessarily finalizing all 16 barrier chunks to FULL.
 
-Minecraft's generation and view-distance systems may still request surrounding dependency chunks. BiomePockets uses a bounded noise generator so those outside chunks remain void: they do not receive terrain, surface generation, carvers, structures, or pocket biome decoration.
+Chunks outside the 5x5 containment square remain void.
 
-A full-height barrier-block wall is placed one block outside the 3x3 terrain footprint, at block coordinates `-17` and `32`. Barrier placement is performed from the bounded generator's FEATURES work for the edge chunks instead of issuing tens of thousands of `ServerLevel#setBlock` calls on the main server thread before teleport. This preserves all 48x48 terrain blocks while providing a physical collision boundary that players and mobs cannot cross.
+## Biome generation
 
-## Biome features
+Pocket terrain uses the selected biome's dimension family where possible. End-tagged biomes use End noise settings/type, Nether-tagged biomes use Nether settings/type, and other biomes use Overworld settings/type. Forge/vanilla biome tags are used first with the 1.18.2 `BiomeDictionary` as a compatibility fallback.
 
-The selected biome's own registered `BiomeGenerationSettings` are authoritative for pocket decoration. During the real `ChunkStatus.FEATURES` stage, each playable chunk reads that biome's `features()` list and runs each registered `PlacedFeature` with `placeWithBiomeCheck(...)`.
+Biome population runs during the real FEATURES stage. Because a pocket has one exact fixed biome, the bounded generator executes that biome's own `BiomeGenerationSettings.features()` / registered `PlacedFeature`s directly while preserving placement modifiers and biome checks. This has been runtime-validated for vanilla trees, grass, flowers, and mushrooms.
 
-Biomes O' Plenty defines its biome vegetation through this standard Minecraft placed-feature pipeline: biome generation settings include vanilla default features plus BOP tree, grass, flower, mushroom, fern, and other `PlacedFeature`s at the normal decoration steps. BiomePockets therefore does not need a BOP-specific tree generator; it needs to execute the selected registered biome's feature list correctly.
+## Asynchronous preparation
 
-The pocket generator deliberately bypasses `ChunkGenerator`/`BiomeSource`'s normal multi-biome `featuresPerStep` selection/indexing layer. A pocket is a fixed single-biome world, so there is no need to rebuild a global feature ordering from multiple possible biomes. The actual vanilla, BOP, BYG, or datapack `PlacedFeature` objects are still used unchanged, including their normal placement modifiers and biome filters.
+All nine playable chunks are submitted together with `ServerChunkCache.getChunkFuture(..., ChunkStatus.FULL, true)` and temporary region tickets. The player remains in the source dimension while terrain, surfaces, carvers, FEATURES, lighting, and final chunk conversion finish. Teleport occurs only after all nine playable chunks complete successfully.
 
-Feature randomization follows vanilla decoration conventions: the origin is the chunk's minimum X/Z at Y=0, and the decoration seed is derived from the pocket generator's own terrain seed. The server log reports the selected biome's placed-feature count and, for the center chunk, how many features were attempted versus how many reported a successful placement. These diagnostics are intended to make any remaining runtime worldgen incompatibility immediately visible.
+Before teleport, BiomePockets searches the full playable area for a safe location with a sturdy floor plus collision-free, fluid-free feet and head blocks. If no natural safe position exists, it creates a 3x3 obsidian emergency platform and clears two blocks of player space above it.
 
-Structure starts and references still use the bounded generator's normal structure hooks. Because pocket biome feature execution now replaces the normal multi-biome decoration body, physical structure-piece placement should be treated as a separate runtime-validation item rather than assumed from a successful compile.
+## Selector
+
+The selector supports normal text search and namespace search. Prefixing a query with `#` filters by mod namespace, for example `#minecraft`.
+
+A separate Mods tab lists namespaces with biome counts. Selecting a namespace shows only its biomes; the Mods tab then acts as a back control to the namespace list.
 
 ## Pocket lifecycle and deletion safety
 
-Every use creates a fresh `biomepockets:pocket_<uuid>` dimension. A pocket is torn down only after the last connected player actually changes dimension out of it. Other players can enter it by command while it exists; it remains alive until the last player explicitly leaves the dimension.
+Every use creates a fresh `biomepockets:pocket_<uuid>` dimension. A pocket is torn down only after the last connected player actually changes dimension out of it.
 
-Logging out is deliberately **not** treated as leaving the pocket. A normal logout, dropped connection, or client crash leaves the dimension intact, allowing vanilla player data to restore the player to the same pocket and coordinates when they reconnect while the server remains running.
+Logging out, losing the connection, or crashing the client is deliberately not treated as leaving. While the server remains running, BiomePockets records the disconnected player's pocket dimension, coordinates, and rotation and explicitly restores them there on login. A pending return reservation also keeps the pocket alive if another player leaves while the disconnected player is expected to return.
 
-Full server-process persistence is not implemented yet. On orderly server shutdown, players still inside active pockets are returned to the overworld before those pockets are removed. On the next orderly start after a server crash, only marker-validated stale `biomepockets:pocket_*` dimensions are reclaimed. Persistent pockets across a complete server restart require serialization/recovery of the runtime bounded generator and are a separate feature.
+Full server-process persistence is not implemented yet. The runtime bounded generator is not serialized, so orderly shutdown/startup cleanup remains separate.
 
 Disk deletion has deliberately redundant ownership checks. A directory is removed only when all of these are true:
 
@@ -62,11 +66,9 @@ Disk deletion has deliberately redundant ownership checks. A directory is remove
 
 Vanilla dimensions and dimensions created by other mods are never candidates for teardown.
 
-## First-pass behavior
+## Xaero compatibility
 
-Pocket terrain uses Overworld noise generation with a `FixedBiomeSource` for the selected biome. The bounded generator delegates normal terrain generation only for the nine pocket chunks and runs that selected biome's registered placed features during the actual FEATURES stage. This is intentionally generic and lets vanilla, BOP, BYG, and datapack biomes work without compile-time integration. Biomes designed specifically around Nether/End terrain may therefore look unusual when paired with Overworld noise settings.
-
-There is not yet a dedicated return item/portal. Leaving by command or any other dimension-changing mechanic triggers the normal empty-pocket teardown. Disconnecting does not.
+BiomePockets emits normal Forge world load/unload events and uses unique dimension IDs. No private Xaero API hook is used. Xaero World Map's Server map-selection mode, with Xaero installed server-side as well as client-side, is the recommended compatibility configuration for dynamic level IDs.
 
 ## Build
 
@@ -77,5 +79,3 @@ gradle build
 ```
 
 GitHub Actions is push-only and follows the same numbered-artifact pattern used by MCMoltenMetals: each branch build uploads a `biome-pockets-<branch-commit-number>.jar` artifact.
-
-The latest code-bearing validation build for this generation path succeeded on commit `f1c2795eead5f64525bc504fb5b41eb784a3208e`, producing `biome-pockets-21.jar`.
