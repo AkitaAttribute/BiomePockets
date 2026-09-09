@@ -6,6 +6,7 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.StructureFeatureManager;
@@ -183,10 +184,16 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
 
         int attempted = 0;
         int placed = 0;
+        int suppressed = 0;
         for (int step = 0; step < featureSteps.size(); step++) {
             int featureIndex = 0;
             for (Holder<PlacedFeature> feature : featureSteps.get(step)) {
                 random.setFeatureSeed(decorationSeed, featureIndex, step);
+                if (isVanillaEndBossFeature(feature)) {
+                    suppressed++;
+                    featureIndex++;
+                    continue;
+                }
                 attempted++;
                 if (feature.value().placeWithBiomeCheck(level, this, random, origin)) {
                     placed++;
@@ -199,17 +206,38 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
 
         if (chunkPos.x == 0 && chunkPos.z == 0) {
             BiomePockets.LOGGER.info(
-                    "Pocket center chunk attempted {} placed features; {} reported placement",
+                    "Pocket center chunk attempted {} placed features; {} reported placement; {} End boss features suppressed",
                     attempted,
-                    placed);
+                    placed,
+                    suppressed);
         } else {
             BiomePockets.LOGGER.debug(
-                    "Pocket chunk {},{} attempted {} placed features; {} reported placement",
+                    "Pocket chunk {},{} attempted {} placed features; {} reported placement; {} End boss features suppressed",
                     chunkPos.x,
                     chunkPos.z,
                     attempted,
-                    placed);
+                    placed,
+                    suppressed);
         }
+    }
+
+    /**
+     * The vanilla central End biome contains worldgen entries that are part of the
+     * one-and-only vanilla End boss arena. A pocket may use End terrain/fog, but it is
+     * not the canonical minecraft:the_end level and must never recreate boss arena
+     * infrastructure there.
+     */
+    private static boolean isVanillaEndBossFeature(Holder<PlacedFeature> feature) {
+        return feature.unwrapKey().map(key -> {
+            ResourceLocation id = key.location();
+            if (!"minecraft".equals(id.getNamespace())) {
+                return false;
+            }
+            String path = id.getPath();
+            return "end_spike".equals(path)
+                    || "end_podium".equals(path)
+                    || "end_platform".equals(path);
+        }).orElse(false);
     }
 
     @Override
