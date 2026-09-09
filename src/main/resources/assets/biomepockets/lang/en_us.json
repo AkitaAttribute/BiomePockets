@@ -1,5 +1,7 @@
 {
   "item.biomepockets.biome_transporter": "Biome Transporter",
   "item.biomepockets.biome_transporter_selector": "Biome Transporter Selector",
-  "screen.biomepockets.selector": "Biome Transporter Selector"
+  "item.biomepockets.pocket_biome_manager": "Pocket Biome Manager",
+  "screen.biomepockets.selector": "Biome Transporter Selector",
+  "screen.biomepockets.pocket_manager": "Pocket Biome Manager"
 }
