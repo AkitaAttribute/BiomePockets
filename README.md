@@ -1,83 +1,46 @@
 # BiomePockets
 
-First-pass Forge 1.18.2 mod for temporary, single-biome pocket dimensions.
+Forge 1.18.2 prototype for temporary, registry-driven single-biome pocket dimensions.
 
-## Items
+## Current behavior
 
-- **Biome Transporter**: uses the vanilla blaze rod model. Right-clicking selects a random biome from the server biome registry, creates a new temporary dimension containing only that biome, and teleports the player into it.
-- **Biome Transporter Selector**: uses the vanilla bone model. Right-clicking opens a searchable biome list and creates a new pocket for the selected biome.
+- Discovers registered biomes from the live biome registry, including vanilla, Biomes O' Plenty, BYG/other mods, and datapacks.
+- Provides a random Biome Transporter and searchable Biome Transporter Selector.
+- Selector supports normal biome search, `#namespace` filtering, and a Mods tab grouped by namespace.
+- Creates one runtime dimension per transporter use using a fixed selected biome.
+- Uses Overworld, Nether, or End generation/environment profiles according to biome tags/classification.
+- Generates only the playable 3x3 terrain square (`-1..1` chunks).
+- Surrounds that terrain with a complete one-chunk-thick solid barrier ring (`-2..2` outer ring); chunks beyond remain void.
+- Generates all nine playable chunks asynchronously through FULL before teleporting the player.
+- Runs the selected biome's registered placed features during FEATURES; trees, grass, flowers, mushrooms, and other biome decoration have been runtime validated.
+- Uses profile-aware initial spawning: highest center surface for normal worlds, cave preference for underground biomes, and safe Nether opening/protected chamber logic.
+- End-profile pockets retain End terrain/fog/material behavior but suppress the vanilla End dragon fight controller and boss-arena features.
 
-Biome discovery is registry-driven. There are no hard dependencies on Biomes O' Plenty or Oh The Biomes You'll Go; if their biomes are registered, they appear automatically alongside vanilla and other mod/datapack biomes.
+## Pocket lifetime and persistence
 
-For testing, `/biomepockets <item>` gives the executing player one of the mod items. Tab completion currently exposes `biome_transporter` and `biome_transporter_selector`.
+Pocket teardown is tied to an explicit dimension departure, not connection state or server process lifetime.
 
-`/biomepockets dimensions` reports both the currently loaded `ServerLevel`s and the registered `LevelStem`s, including vanilla and dimensions supplied by other mods.
+- Disconnect/logout does not destroy the pocket.
+- A connected-server reconnect restores the player to the exact saved pocket position.
+- Save & Quit / orderly dedicated-server shutdown preserves the pocket dimension folder and player return point instead of teleporting players to Overworld or deleting the pocket.
+- On the next server start, BiomePockets reconstructs each marker-validated pocket with the bounded runtime generator before player login restoration.
+- If a dynamic LevelStem was autosaved before a crash, recovery replaces that automatically loaded level with the bounded BiomePockets generator rather than trusting the serialized superclass generator.
+- Pocket metadata is written when players enter/disconnect and again on orderly shutdown so existing chunk data can be reused without regenerating the 3x3.
 
-## Pocket shape
+Normal explicit departure from the pocket still tears it down when no players or return reservations remain.
 
-Each pocket contains a 3x3 playable terrain square:
+## Deletion guardrails
 
-```text
-000
-000
-000
-```
+Destructive cleanup remains restricted to dimensions that:
 
-The terrain chunks are `-1..1` on both X and Z, covering blocks `-16..31` on each horizontal axis.
+1. are in BiomePockets runtime ownership state,
+2. use namespace exactly `biomepockets`,
+3. have a path beginning `pocket_`,
+4. have a `.biomepockets-owned` marker whose exact contents match the dimension ID, and
+5. resolve to the expected folder beneath `dimensions/biomepockets/`.
 
-The complete one-chunk ring surrounding that playable area is generated as solid barrier chunks. In chunk coordinates, the prepared containment square is therefore `-2..2`, with the inner 3x3 using normal terrain and the outer 16 chunks consisting entirely of barrier blocks from build bottom to build top. This prevents trees and other placed features in edge chunks from blooming into neighboring void chunks.
+Vanilla and third-party dimensions are never selected for deletion based on emptiness.
 
-The barrier ring is written directly into `ChunkAccess` during the ring chunks' NOISE stage rather than through live-world `ServerLevel#setBlock` calls. The nine playable chunks are still the chunks explicitly awaited through `ChunkStatus.FULL`; Minecraft's generation dependency graph prepares their neighboring ring chunks before edge FEATURES can complete, so the barrier exists before vegetation is placed without unnecessarily finalizing all 16 barrier chunks to FULL.
+## Diagnostic command
 
-Chunks outside the 5x5 containment square remain void.
-
-## Biome generation
-
-Pocket terrain uses the selected biome's dimension family where possible. End-tagged biomes use End noise settings/type, Nether-tagged biomes use Nether settings/type, and other biomes use Overworld settings/type. Forge/vanilla biome tags are used first with the 1.18.2 `BiomeDictionary` as a compatibility fallback.
-
-Biome population runs during the real FEATURES stage. Because a pocket has one exact fixed biome, the bounded generator executes that biome's own `BiomeGenerationSettings.features()` / registered `PlacedFeature`s directly while preserving placement modifiers and biome checks. This has been runtime-validated for vanilla trees, grass, flowers, and mushrooms.
-
-## Asynchronous preparation
-
-All nine playable chunks are submitted together with `ServerChunkCache.getChunkFuture(..., ChunkStatus.FULL, true)` and temporary region tickets. The player remains in the source dimension while terrain, surfaces, carvers, FEATURES, lighting, and final chunk conversion finish. Teleport occurs only after all nine playable chunks complete successfully.
-
-Before teleport, BiomePockets searches the full playable area for a safe location with a sturdy floor plus collision-free, fluid-free feet and head blocks. If no natural safe position exists, it creates a 3x3 obsidian emergency platform and clears two blocks of player space above it.
-
-## Selector
-
-The selector supports normal text search and namespace search. Prefixing a query with `#` filters by mod namespace, for example `#minecraft`.
-
-A separate Mods tab lists namespaces with biome counts. Selecting a namespace shows only its biomes; the Mods tab then acts as a back control to the namespace list.
-
-## Pocket lifecycle and deletion safety
-
-Every use creates a fresh `biomepockets:pocket_<uuid>` dimension. A pocket is torn down only after the last connected player actually changes dimension out of it.
-
-Logging out, losing the connection, or crashing the client is deliberately not treated as leaving. While the server remains running, BiomePockets records the disconnected player's pocket dimension, coordinates, and rotation and explicitly restores them there on login. A pending return reservation also keeps the pocket alive if another player leaves while the disconnected player is expected to return.
-
-Full server-process persistence is not implemented yet. The runtime bounded generator is not serialized, so orderly shutdown/startup cleanup remains separate.
-
-Disk deletion has deliberately redundant ownership checks. A directory is removed only when all of these are true:
-
-1. The dimension is in BiomePockets' in-memory ownership map, or is being recovered as a stale pocket at server start.
-2. Its namespace is exactly `biomepockets` and its path begins with `pocket_`.
-3. Its storage path is beneath the world's `dimensions/biomepockets/` directory and its final directory name exactly matches the dimension path.
-4. The directory contains `.biomepockets-owned` whose contents exactly match the dimension ID.
-
-Vanilla dimensions and dimensions created by other mods are never candidates for teardown.
-
-## Xaero compatibility
-
-BiomePockets emits normal Forge world load/unload events and uses unique dimension IDs. No private Xaero API hook is used. Xaero World Map's Server map-selection mode, with Xaero installed server-side as well as client-side, is the recommended compatibility configuration for dynamic level IDs.
-
-## Build
-
-Java 17, Minecraft 1.18.2, Forge 40.3.12.
-
-```text
-gradle build
-```
-
-GitHub Actions is push-only and follows the same numbered-artifact pattern used by MCMoltenMetals: each branch build uploads a `biome-pockets-<branch-commit-number>.jar` artifact.
-
-Latest code-bearing validation: commit `25e092d1740baa33c67fba0c92ce4b01c5e26519` built successfully as `biome-pockets-29.jar`.
+`/biomepockets dimensions` reports loaded ServerLevels and registered LevelStems, including vanilla and third-party dimensions.
