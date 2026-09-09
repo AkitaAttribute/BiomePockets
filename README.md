@@ -29,7 +29,7 @@ Pocket teardown is tied to an explicit dimension departure, not connection state
 
 Normal explicit departure from the pocket still tears it down when no players or return reservations remain.
 
-The restart/recovery implementation compiles successfully but still requires runtime validation in both integrated-server Save & Quit and dedicated-server restart scenarios.
+The restart/recovery implementation in `biome-pockets-37.jar` compiles successfully but still requires runtime validation in both integrated-server Save & Quit and dedicated-server restart scenarios.
 
 ## Deletion guardrails
 
