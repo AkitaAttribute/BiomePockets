@@ -41,6 +41,8 @@ This deliberately bypasses `ChunkGenerator`/`BiomeSource`'s normal multi-biome `
 
 Feature randomization follows vanilla decoration conventions: the origin is the chunk's minimum X/Z at Y=0, and the decoration seed is derived from the pocket generator's own terrain seed. The server log reports the selected biome's placed-feature count and, for the center chunk, how many features were attempted versus how many reported a successful placement. These diagnostics are intended to make any remaining runtime worldgen incompatibility immediately visible.
 
+Structure starts and references still use the bounded generator's normal structure hooks. Because pocket biome feature execution now replaces the normal multi-biome decoration body, physical structure-piece placement should be treated as a separate runtime-validation item rather than assumed from a successful compile.
+
 ## Pocket lifecycle and deletion safety
 
 Every use creates a fresh `biomepockets:pocket_<uuid>` dimension. A pocket is torn down only after the last connected player actually changes dimension out of it. Other players can enter it by command while it exists; it remains alive until the last player explicitly leaves the dimension.
