@@ -37,7 +37,9 @@ A full-height barrier-block wall is placed one block outside the 3x3 terrain foo
 
 The selected biome's own registered `BiomeGenerationSettings` are authoritative for pocket decoration. During the real `ChunkStatus.FEATURES` stage, each playable chunk reads that biome's `features()` list and runs each registered `PlacedFeature` with `placeWithBiomeCheck(...)`.
 
-This deliberately bypasses `ChunkGenerator`/`BiomeSource`'s normal multi-biome `featuresPerStep` selection/indexing layer. A pocket is a fixed single-biome world, so there is no need to rebuild a global feature ordering from multiple possible biomes. The actual vanilla, BOP, BYG, or datapack `PlacedFeature` objects are still used unchanged, including their normal placement modifiers and biome filters.
+Biomes O' Plenty defines its biome vegetation through this standard Minecraft placed-feature pipeline: biome generation settings include vanilla default features plus BOP tree, grass, flower, mushroom, fern, and other `PlacedFeature`s at the normal decoration steps. BiomePockets therefore does not need a BOP-specific tree generator; it needs to execute the selected registered biome's feature list correctly.
+
+The pocket generator deliberately bypasses `ChunkGenerator`/`BiomeSource`'s normal multi-biome `featuresPerStep` selection/indexing layer. A pocket is a fixed single-biome world, so there is no need to rebuild a global feature ordering from multiple possible biomes. The actual vanilla, BOP, BYG, or datapack `PlacedFeature` objects are still used unchanged, including their normal placement modifiers and biome filters.
 
 Feature randomization follows vanilla decoration conventions: the origin is the chunk's minimum X/Z at Y=0, and the decoration seed is derived from the pocket generator's own terrain seed. The server log reports the selected biome's placed-feature count and, for the center chunk, how many features were attempted versus how many reported a successful placement. These diagnostics are intended to make any remaining runtime worldgen incompatibility immediately visible.
 
