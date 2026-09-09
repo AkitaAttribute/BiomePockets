@@ -1,5 +1,6 @@
 package com.akitaattribute.biomepockets.client;
 
+import com.akitaattribute.biomepockets.network.OpenPocketManagerPacket;
 import net.minecraft.client.Minecraft;
 import net.minecraft.resources.ResourceLocation;
 
@@ -10,5 +11,9 @@ public final class ClientHooks {
 
     public static void openBiomeSelector(List<ResourceLocation> biomes) {
         Minecraft.getInstance().setScreen(new BiomeSelectorScreen(biomes));
+    }
+
+    public static void openPocketManager(OpenPocketManagerPacket state) {
+        Minecraft.getInstance().setScreen(new PocketBiomeManagerScreen(state));
     }
 }
