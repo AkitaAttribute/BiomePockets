@@ -68,6 +68,7 @@ public final class PocketBiomeManagerScreen extends Screen {
                 BUTTON_WIDTH,
                 BUTTON_HEIGHT,
                 expansionLabel(),
+                expansionLevelEquivalent(),
                 state.expansionCost(),
                 state.creative() || state.availableXp() >= state.expansionCost(),
                 button -> submit(PocketClaimManager.Action.EXPAND));
@@ -93,6 +94,17 @@ public final class PocketBiomeManagerScreen extends Screen {
                 button -> submit(PocketClaimManager.Action.EXIT));
         exit.active = state.canExit();
         addRenderableWidget(exit);
+    }
+
+    private int expansionLevelEquivalent() {
+        if (!state.hasClaim() || state.expansionCost() <= 0) {
+            return 0;
+        }
+
+        // 3x3 is expansion tier 1 (30-level equivalent), 5x5 is tier 2
+        // (60-level equivalent), etc. Charging is still performed in raw XP points.
+        int currentRadius = Math.max(1, (state.currentSize() - 1) / 2);
+        return currentRadius * 30;
     }
 
     private Component expansionLabel() {
@@ -149,7 +161,9 @@ public final class PocketBiomeManagerScreen extends Screen {
     private static final class ExpandButton extends Button {
         private static final ResourceLocation ENCHANTMENT_TABLE_GUI =
                 new ResourceLocation("textures/gui/container/enchanting_table.png");
+        private static final int XP_ORB_CROP_WIDTH = 11;
 
+        private final int levelEquivalentCost;
         private final int rawXpCost;
         private final boolean canAfford;
 
@@ -159,10 +173,12 @@ public final class PocketBiomeManagerScreen extends Screen {
                 int width,
                 int height,
                 Component message,
+                int levelEquivalentCost,
                 int rawXpCost,
                 boolean canAfford,
                 OnPress onPress) {
             super(x, y, width, height, message, onPress);
+            this.levelEquivalentCost = levelEquivalentCost;
             this.rawXpCost = rawXpCost;
             this.canAfford = canAfford;
         }
@@ -170,31 +186,48 @@ public final class PocketBiomeManagerScreen extends Screen {
         @Override
         public void renderButton(PoseStack poseStack, int mouseX, int mouseY, float partialTick) {
             super.renderButton(poseStack, mouseX, mouseY, partialTick);
-            if (rawXpCost <= 0) {
+            if (rawXpCost <= 0 || levelEquivalentCost <= 0) {
                 return;
             }
 
-            // Same vanilla enchanting-table requirement icon Waystones 1.18 uses for
-            // XP-priced destinations. We render the raw-point cost beside it because
-            // expansion is charged in XP points, not by subtracting level numbers.
+            // Waystones uses one of the vanilla enchanting-table 1/2/3 requirement
+            // sprites. Those sprites contain their numeral, so draw only the orb part
+            // of the first sprite and render our explicit 30/60/90... tier ourselves.
             RenderSystem.setShaderColor(1F, 1F, 1F, 1F);
             RenderSystem.setShaderTexture(0, ENCHANTMENT_TABLE_GUI);
-            int iconX = x + width - 67;
-            int iconY = y + 3;
-            blit(poseStack, iconX, iconY, 0, 223 + (!canAfford ? 16 : 0), 16, 16);
 
             Minecraft minecraft = Minecraft.getInstance();
-            String cost = Integer.toString(rawXpCost);
-            int color = canAfford ? 0xC8FF8F : 0xFF7777;
-            minecraft.font.draw(poseStack, cost, iconX + 18, y + 7, color);
+            String levelCost = Integer.toString(levelEquivalentCost);
+            String rawCost = "(" + rawXpCost + " XP)";
+            int levelWidth = minecraft.font.width(levelCost);
+            int rawWidth = minecraft.font.width(rawCost);
+            int groupWidth = XP_ORB_CROP_WIDTH + 2 + levelWidth + 4 + rawWidth;
+            int iconX = x + width - groupWidth - 8;
+            int iconY = y + 3;
+
+            blit(
+                    poseStack,
+                    iconX,
+                    iconY,
+                    0,
+                    223 + (!canAfford ? 16 : 0),
+                    XP_ORB_CROP_WIDTH,
+                    16);
+
+            int levelColor = canAfford ? 0xC8FF8F : 0xFF7777;
+            int textY = y + 7;
+            int levelX = iconX + XP_ORB_CROP_WIDTH + 2;
+            minecraft.font.draw(poseStack, levelCost, levelX, textY, levelColor);
+            minecraft.font.draw(
+                    poseStack,
+                    rawCost,
+                    levelX + levelWidth + 4,
+                    textY,
+                    canAfford ? 0xAAAAAA : 0xCC7777);
 
             if (isHoveredOrFocused() && mouseX >= iconX - 2) {
-                String tooltip = rawXpCost + " XP points";
-                if (!canAfford) {
-                    tooltip = ChatFormatting.RED + tooltip;
-                } else {
-                    tooltip = ChatFormatting.GREEN + tooltip;
-                }
+                String tooltip = levelEquivalentCost + "-level equivalent = " + rawXpCost + " XP points";
+                tooltip = (canAfford ? ChatFormatting.GREEN : ChatFormatting.RED) + tooltip;
                 Minecraft.getInstance().screen.renderTooltip(
                         poseStack,
                         new TextComponent(tooltip),
