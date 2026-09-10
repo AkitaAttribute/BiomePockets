@@ -1,6 +1,7 @@
 package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
@@ -11,6 +12,7 @@ import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.world.SleepFinishedTimeEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.server.ServerLifecycleHooks;
 
 /**
  * Pocket lifetime is tied to an explicit dimension departure, not connection or
@@ -79,16 +81,18 @@ public final class PocketLifecycleEvents {
     }
 
     @SubscribeEvent
-    public static void onWorldTick(TickEvent.WorldTickEvent event) {
-        if (event.phase != TickEvent.Phase.END
-                || !(event.world instanceof ServerLevel level)
-                || !level.dimension().equals(Level.OVERWORLD)) {
+    public static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) {
             return;
         }
 
-        // Restrict processing to the Overworld END tick so this runs exactly once per
-        // server tick even when several pocket dimensions are loaded.
-        PocketDepartureCleanup.tick(level.getServer());
+        // END fires after Minecraft has finished iterating/ticking its ServerLevels.
+        // Removing a dynamic ServerLevel here is safer than mutating the world map from
+        // inside a WorldTickEvent while that map may still be actively iterated.
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server != null) {
+            PocketDepartureCleanup.tick(server);
+        }
     }
 
     @SubscribeEvent
