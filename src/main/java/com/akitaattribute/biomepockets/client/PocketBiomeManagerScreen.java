@@ -16,9 +16,11 @@ import net.minecraft.resources.ResourceLocation;
 
 public final class PocketBiomeManagerScreen extends Screen {
     private static final int PANEL_WIDTH = 340;
+    private static final int PANEL_HEIGHT = 226;
     private static final int BUTTON_WIDTH = 270;
     private static final int BUTTON_HEIGHT = 22;
     private static final int BUTTON_GAP = 7;
+    private static final int HEADER_HEIGHT = 50;
 
     private final OpenPocketManagerPacket state;
 
@@ -27,10 +29,18 @@ public final class PocketBiomeManagerScreen extends Screen {
         this.state = state;
     }
 
+    private int panelTop() {
+        return Math.max(20, height / 2 - PANEL_HEIGHT / 2);
+    }
+
+    private int buttonTop() {
+        return panelTop() + HEADER_HEIGHT;
+    }
+
     @Override
     protected void init() {
         int left = (width - BUTTON_WIDTH) / 2;
-        int top = Math.max(52, height / 2 - 83);
+        int top = buttonTop();
 
         Button claim = new Button(
                 left,
@@ -106,8 +116,8 @@ public final class PocketBiomeManagerScreen extends Screen {
         renderBackground(poseStack);
 
         int panelLeft = (width - PANEL_WIDTH) / 2;
-        int panelTop = Math.max(27, height / 2 - 116);
-        int panelBottom = Math.min(height - 20, panelTop + 226);
+        int panelTop = panelTop();
+        int panelBottom = Math.min(height - 12, panelTop + PANEL_HEIGHT);
         fill(poseStack, panelLeft, panelTop, panelLeft + PANEL_WIDTH, panelBottom, 0xD8202020);
         fill(poseStack, panelLeft, panelTop, panelLeft + PANEL_WIDTH, panelTop + 1, 0xFFAAAAAA);
 
@@ -116,7 +126,7 @@ public final class PocketBiomeManagerScreen extends Screen {
                 font,
                 title,
                 width / 2,
-                panelTop + 11,
+                panelTop + 10,
                 0xFFFFFF);
 
         String status;
@@ -131,7 +141,7 @@ public final class PocketBiomeManagerScreen extends Screen {
             status = "No permanent pocket claimed";
             statusColor = 0xFFAAAAAA;
         }
-        drawCenteredString(poseStack, font, status, width / 2, panelTop + 27, statusColor);
+        drawCenteredString(poseStack, font, status, width / 2, panelTop + 29, statusColor);
 
         super.render(poseStack, mouseX, mouseY, partialTick);
     }
