@@ -1,7 +1,10 @@
 package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
@@ -29,8 +32,27 @@ public final class PocketLifecycleEvents {
             if (!PocketClaimManager.isClaimed(event.getFrom())
                     && !PocketClaimManager.isProtectedReturnDimension(event.getFrom())) {
                 PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
+
+                // The immediate call can occur while ServerLevel.players() still has
+                // the player who is in the middle of switching dimensions. Retry after
+                // the transition has fully settled so expansion source pockets cannot
+                // remain loaded merely because of event timing.
+                PocketDepartureCleanup.schedule(event.getFrom());
             }
         }
+    }
+
+    @SubscribeEvent
+    public static void onWorldTick(TickEvent.WorldTickEvent event) {
+        if (event.phase != TickEvent.Phase.END
+                || !(event.world instanceof ServerLevel level)
+                || !level.dimension().equals(Level.OVERWORLD)) {
+            return;
+        }
+
+        // Restrict processing to the Overworld END tick so this runs exactly once per
+        // server tick even when several pocket dimensions are loaded.
+        PocketDepartureCleanup.tick(level.getServer());
     }
 
     @SubscribeEvent
@@ -59,12 +81,14 @@ public final class PocketLifecycleEvents {
 
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
+        PocketDepartureCleanup.clear();
         PocketPersistenceManager.recoverPockets(event.getServer());
         PocketClaimManager.load(event.getServer());
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
+        PocketDepartureCleanup.clear();
         PocketClaimManager.saveAll(event.getServer());
 
         // Do not call PocketDimensionManager.shutdown(): that method intentionally
