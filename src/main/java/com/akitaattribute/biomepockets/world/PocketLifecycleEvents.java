@@ -84,6 +84,12 @@ public final class PocketLifecycleEvents {
         PocketDepartureCleanup.clear();
         PocketPersistenceManager.recoverPockets(event.getServer());
         PocketClaimManager.load(event.getServer());
+
+        // Recovery must happen before this cleanup so claim files, Visit return points,
+        // and disconnect reservations are all known. Anything still empty/unclaimed/
+        // unreserved after that is a stale temporary pocket and can safely be removed
+        // through the ordinary marker-validated teardown path.
+        PocketDepartureCleanup.cleanupRecoveredStalePockets(event.getServer());
     }
 
     @SubscribeEvent
