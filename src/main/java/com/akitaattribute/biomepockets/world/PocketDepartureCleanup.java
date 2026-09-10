@@ -46,8 +46,25 @@ public final class PocketDepartureCleanup {
     }
 
     public static void tick(MinecraftServer server) {
+        observeOccupiedPockets(server);
         processDelayedDepartures(server);
         sweepEnteredTemporaryPockets(server);
+    }
+
+    /**
+     * This makes lifecycle tracking independent of PlayerChangedDimensionEvent. If a
+     * player is physically present in a BiomePockets level at the end of a server tick,
+     * that level has unquestionably been entered and is safe to audit after it later
+     * becomes empty. Empty dimensions still generating in the background are never
+     * marked by this observation alone.
+     */
+    @SuppressWarnings("deprecation")
+    private static void observeOccupiedPockets(MinecraftServer server) {
+        for (Map.Entry<ResourceKey<Level>, ServerLevel> entry : server.forgeGetWorldMap().entrySet()) {
+            if (PocketDimensionManager.isOwned(entry.getKey()) && !entry.getValue().players().isEmpty()) {
+                ENTERED.add(entry.getKey());
+            }
+        }
     }
 
     private static void processDelayedDepartures(MinecraftServer server) {
