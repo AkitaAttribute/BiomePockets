@@ -7,8 +7,10 @@ import net.minecraft.world.level.Level;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Handles temporary-pocket cleanup when lifecycle timing would otherwise leave a
@@ -20,21 +22,42 @@ public final class PocketDepartureCleanup {
     private static final int RETRY_DELAY_TICKS = 2;
     private static final Map<ResourceKey<Level>, Integer> PENDING = new HashMap<>();
 
+    /**
+     * Only pockets that a player has actually entered are eligible for the continuous
+     * empty-pocket sweep. This distinction is important: a newly-created pocket is
+     * intentionally empty while its chunks are still being prepared asynchronously,
+     * and an expansion replacement may also exist before its ownership transfer.
+     */
+    private static final Set<ResourceKey<Level>> ENTERED = new HashSet<>();
+
     private PocketDepartureCleanup() { }
+
+    public static void markEntered(ResourceKey<Level> dimension) {
+        if (PocketDimensionManager.isOwned(dimension)) {
+            ENTERED.add(dimension);
+        }
+    }
 
     public static void schedule(ResourceKey<Level> dimension) {
         if (PocketDimensionManager.isOwned(dimension)) {
+            ENTERED.add(dimension);
             PENDING.put(dimension, RETRY_DELAY_TICKS);
         }
     }
 
     public static void tick(MinecraftServer server) {
+        processDelayedDepartures(server);
+        sweepEnteredTemporaryPockets(server);
+    }
+
+    private static void processDelayedDepartures(MinecraftServer server) {
         Iterator<Map.Entry<ResourceKey<Level>, Integer>> iterator = PENDING.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<ResourceKey<Level>, Integer> entry = iterator.next();
             ResourceKey<Level> dimension = entry.getKey();
 
             if (!PocketDimensionManager.isOwned(dimension)) {
+                ENTERED.remove(dimension);
                 iterator.remove();
                 continue;
             }
@@ -53,16 +76,51 @@ public final class PocketDepartureCleanup {
                 continue;
             }
 
-            ServerLevel level = server.getLevel(dimension);
-            if (level != null && !level.players().isEmpty()) {
-                // Another player is legitimately still in the temporary pocket. Their
-                // own eventual departure will schedule another retry if needed.
+            PocketDimensionManager.teardownIfEmpty(server, dimension);
+            if (!PocketDimensionManager.isOwned(dimension)) {
+                ENTERED.remove(dimension);
+            }
+            iterator.remove();
+        }
+    }
+
+    /**
+     * Do not rely exclusively on PlayerChangedDimensionEvent for cleanup. Once a
+     * temporary pocket has actually been entered, keep auditing it. If it becomes
+     * empty and has no permanent claim, Visit return reference, or disconnect return
+     * reservation, teardownIfEmpty() is allowed to remove it. A transient veto does
+     * not permanently leak the dimension; the next server tick re-evaluates it.
+     */
+    private static void sweepEnteredTemporaryPockets(MinecraftServer server) {
+        Iterator<ResourceKey<Level>> iterator = ENTERED.iterator();
+        while (iterator.hasNext()) {
+            ResourceKey<Level> dimension = iterator.next();
+            if (!PocketDimensionManager.isOwned(dimension)) {
+                PENDING.remove(dimension);
                 iterator.remove();
                 continue;
             }
 
+            if (PocketClaimManager.isClaimed(dimension)
+                    || PocketClaimManager.isProtectedReturnDimension(dimension)) {
+                continue;
+            }
+
+            ServerLevel level = server.getLevel(dimension);
+            if (level == null) {
+                PENDING.remove(dimension);
+                iterator.remove();
+                continue;
+            }
+            if (!level.players().isEmpty()) {
+                continue;
+            }
+
             PocketDimensionManager.teardownIfEmpty(server, dimension);
-            iterator.remove();
+            if (!PocketDimensionManager.isOwned(dimension)) {
+                PENDING.remove(dimension);
+                iterator.remove();
+            }
         }
     }
 
@@ -94,6 +152,8 @@ public final class PocketDepartureCleanup {
             // is still preserved for reconnect and will not be deleted here.
             PocketDimensionManager.teardownIfEmpty(server, dimension);
             if (!PocketDimensionManager.isOwned(dimension)) {
+                ENTERED.remove(dimension);
+                PENDING.remove(dimension);
                 removed++;
             }
         }
@@ -107,5 +167,6 @@ public final class PocketDepartureCleanup {
 
     public static void clear() {
         PENDING.clear();
+        ENTERED.clear();
     }
 }
