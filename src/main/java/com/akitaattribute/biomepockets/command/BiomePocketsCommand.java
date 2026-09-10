@@ -3,8 +3,10 @@ package com.akitaattribute.biomepockets.command;
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.akitaattribute.biomepockets.registry.ModItems;
 import com.akitaattribute.biomepockets.world.PocketAdminActions;
+import com.akitaattribute.biomepockets.world.PocketCleanupAdmin;
 import com.akitaattribute.biomepockets.world.PocketDiagnostics;
 import com.akitaattribute.biomepockets.world.PocketDimensionManager;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
@@ -47,6 +49,13 @@ public final class BiomePocketsCommand {
         event.getDispatcher().register(Commands.literal("biomepockets")
                 .then(Commands.literal("dimensions")
                         .executes(context -> listDimensions(context.getSource())))
+                .then(Commands.literal("cleanup")
+                        .requires(source -> source.hasPermission(2))
+                        .executes(context -> PocketCleanupAdmin.report(context.getSource()))
+                        .then(Commands.argument("minimumAgeMinutes", IntegerArgumentType.integer(0))
+                                .executes(context -> PocketCleanupAdmin.cleanup(
+                                        context.getSource(),
+                                        IntegerArgumentType.getInteger(context, "minimumAgeMinutes")))))
                 .then(Commands.literal("expand")
                         .requires(source -> source.hasPermission(2))
                         .executes(context -> expandPocket(
