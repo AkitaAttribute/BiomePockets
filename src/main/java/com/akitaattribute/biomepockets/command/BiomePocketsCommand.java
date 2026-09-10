@@ -3,6 +3,7 @@ package com.akitaattribute.biomepockets.command;
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.akitaattribute.biomepockets.registry.ModItems;
 import com.akitaattribute.biomepockets.world.PocketAdminActions;
+import com.akitaattribute.biomepockets.world.PocketDiagnostics;
 import com.akitaattribute.biomepockets.world.PocketDimensionManager;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -94,7 +95,7 @@ public final class BiomePocketsCommand {
             ServerLevel level = liveWorlds.get(key);
             String suffix = " [players=" + (level == null ? 0 : level.players().size()) + "]";
             if (PocketDimensionManager.isOwned(key)) {
-                suffix += " [BiomePockets-owned]";
+                suffix += PocketDiagnostics.describe(server, key);
             }
             source.sendSuccess(new TextComponent(" - " + key.location() + suffix), false);
         }
@@ -105,7 +106,7 @@ public final class BiomePocketsCommand {
             boolean isLoaded = liveWorlds.containsKey(levelKey);
             String suffix = " [loaded=" + (isLoaded ? "yes" : "no") + "]";
             if (PocketDimensionManager.isOwned(levelKey)) {
-                suffix += " [BiomePockets-owned]";
+                suffix += PocketDiagnostics.describe(server, levelKey);
             }
             source.sendSuccess(new TextComponent(" - " + stemKey.location() + suffix), false);
         }
