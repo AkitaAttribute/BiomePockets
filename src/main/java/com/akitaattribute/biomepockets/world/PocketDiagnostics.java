@@ -12,7 +12,7 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.UUID;
 
-/** Read-only diagnostic helpers for /biomepockets dimensions. */
+/** Read-only diagnostic helpers for /biomepockets dimensions and cleanup. */
 public final class PocketDiagnostics {
     private PocketDiagnostics() { }
 
@@ -23,9 +23,7 @@ public final class PocketDiagnostics {
 
         ResourceLocation biome = ownedBiome(dimension);
         UUID owner = claimOwner(dimension);
-        boolean returnReserved = PocketClaimManager.isProtectedReturnDimension(dimension)
-                || hasDisconnectReservation(dimension)
-                || hasPersistedReturnReservation(dimension);
+        boolean returnReserved = isReturnReserved(dimension);
 
         StringBuilder result = new StringBuilder(" [BiomePockets-owned]");
         if (owner != null) {
@@ -44,6 +42,12 @@ public final class PocketDiagnostics {
                 .append(biome == null ? "unknown" : biome)
                 .append(']');
         return result.toString();
+    }
+
+    public static boolean isReturnReserved(ResourceKey<Level> dimension) {
+        return PocketClaimManager.isProtectedReturnDimension(dimension)
+                || hasDisconnectReservation(dimension)
+                || hasPersistedReturnReservation(dimension);
     }
 
     @SuppressWarnings("unchecked")
