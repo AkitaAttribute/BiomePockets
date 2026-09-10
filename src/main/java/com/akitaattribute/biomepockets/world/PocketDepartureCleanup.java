@@ -6,140 +6,18 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * Handles temporary-pocket cleanup when lifecycle timing would otherwise leave a
- * BiomePockets-owned level behind. All destructive work still routes through
- * PocketDimensionManager.teardownIfEmpty(), which retains the namespace/key/marker/
- * path safeguards used by normal pocket teardown.
+ * Startup-only cleanup for stale temporary pockets left behind by an interrupted
+ * shutdown or by older BiomePockets builds. Runtime teardown is event-driven from
+ * actual dimension departures; there is deliberately no per-tick pocket polling.
+ *
+ * All destructive work still routes through PocketDimensionManager.teardownIfEmpty(),
+ * which retains the namespace/key/marker/path safeguards used by normal teardown.
  */
 public final class PocketDepartureCleanup {
-    private static final int RETRY_DELAY_TICKS = 2;
-    private static final Map<ResourceKey<Level>, Integer> PENDING = new HashMap<>();
-
-    /**
-     * Only pockets that a player has actually entered are eligible for the continuous
-     * empty-pocket sweep. This distinction is important: a newly-created pocket is
-     * intentionally empty while its chunks are still being prepared asynchronously,
-     * and an expansion replacement may also exist before its ownership transfer.
-     */
-    private static final Set<ResourceKey<Level>> ENTERED = new HashSet<>();
-
     private PocketDepartureCleanup() { }
-
-    public static void markEntered(ResourceKey<Level> dimension) {
-        if (PocketDimensionManager.isOwned(dimension)) {
-            ENTERED.add(dimension);
-        }
-    }
-
-    public static void schedule(ResourceKey<Level> dimension) {
-        if (PocketDimensionManager.isOwned(dimension)) {
-            ENTERED.add(dimension);
-            PENDING.put(dimension, RETRY_DELAY_TICKS);
-        }
-    }
-
-    public static void tick(MinecraftServer server) {
-        observeOccupiedPockets(server);
-        processDelayedDepartures(server);
-        sweepEnteredTemporaryPockets(server);
-    }
-
-    /**
-     * This makes lifecycle tracking independent of PlayerChangedDimensionEvent. If a
-     * player is physically present in a BiomePockets level at the end of a server tick,
-     * that level has unquestionably been entered and is safe to audit after it later
-     * becomes empty. Empty dimensions still generating in the background are never
-     * marked by this observation alone.
-     */
-    @SuppressWarnings("deprecation")
-    private static void observeOccupiedPockets(MinecraftServer server) {
-        for (Map.Entry<ResourceKey<Level>, ServerLevel> entry : server.forgeGetWorldMap().entrySet()) {
-            if (PocketDimensionManager.isOwned(entry.getKey()) && !entry.getValue().players().isEmpty()) {
-                ENTERED.add(entry.getKey());
-            }
-        }
-    }
-
-    private static void processDelayedDepartures(MinecraftServer server) {
-        Iterator<Map.Entry<ResourceKey<Level>, Integer>> iterator = PENDING.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<ResourceKey<Level>, Integer> entry = iterator.next();
-            ResourceKey<Level> dimension = entry.getKey();
-
-            if (!PocketDimensionManager.isOwned(dimension)) {
-                ENTERED.remove(dimension);
-                iterator.remove();
-                continue;
-            }
-
-            // A pocket may have become permanent/protected after it was scheduled.
-            // Never let this retry override the claim/Visit lifetime rules.
-            if (PocketClaimManager.isClaimed(dimension)
-                    || PocketClaimManager.isProtectedReturnDimension(dimension)) {
-                iterator.remove();
-                continue;
-            }
-
-            int remaining = entry.getValue();
-            if (remaining > 0) {
-                entry.setValue(remaining - 1);
-                continue;
-            }
-
-            PocketDimensionManager.teardownIfEmpty(server, dimension);
-            if (!PocketDimensionManager.isOwned(dimension)) {
-                ENTERED.remove(dimension);
-            }
-            iterator.remove();
-        }
-    }
-
-    /**
-     * Do not rely exclusively on PlayerChangedDimensionEvent for cleanup. Once a
-     * temporary pocket has actually been entered, keep auditing it. If it becomes
-     * empty and has no permanent claim, Visit return reference, or disconnect return
-     * reservation, teardownIfEmpty() is allowed to remove it. A transient veto does
-     * not permanently leak the dimension; the next server tick re-evaluates it.
-     */
-    private static void sweepEnteredTemporaryPockets(MinecraftServer server) {
-        Iterator<ResourceKey<Level>> iterator = ENTERED.iterator();
-        while (iterator.hasNext()) {
-            ResourceKey<Level> dimension = iterator.next();
-            if (!PocketDimensionManager.isOwned(dimension)) {
-                PENDING.remove(dimension);
-                iterator.remove();
-                continue;
-            }
-
-            if (PocketClaimManager.isClaimed(dimension)
-                    || PocketClaimManager.isProtectedReturnDimension(dimension)) {
-                continue;
-            }
-
-            ServerLevel level = server.getLevel(dimension);
-            if (level == null) {
-                PENDING.remove(dimension);
-                iterator.remove();
-                continue;
-            }
-            if (!level.players().isEmpty()) {
-                continue;
-            }
-
-            PocketDimensionManager.teardownIfEmpty(server, dimension);
-            if (!PocketDimensionManager.isOwned(dimension)) {
-                PENDING.remove(dimension);
-                iterator.remove();
-            }
-        }
-    }
 
     /**
      * Recovery intentionally reconstructs every marker-validated pocket first so that
@@ -169,8 +47,6 @@ public final class PocketDepartureCleanup {
             // is still preserved for reconnect and will not be deleted here.
             PocketDimensionManager.teardownIfEmpty(server, dimension);
             if (!PocketDimensionManager.isOwned(dimension)) {
-                ENTERED.remove(dimension);
-                PENDING.remove(dimension);
                 removed++;
             }
         }
@@ -180,10 +56,5 @@ public final class PocketDepartureCleanup {
                     "Removed {} stale empty temporary BiomePockets level(s) after recovery",
                     removed);
         }
-    }
-
-    public static void clear() {
-        PENDING.clear();
-        ENTERED.clear();
     }
 }
