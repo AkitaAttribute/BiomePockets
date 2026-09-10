@@ -1,11 +1,11 @@
 package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.TextComponent;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.storage.LevelResource;
@@ -16,7 +16,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -31,10 +30,7 @@ public final class PocketCleanupAdmin {
 
     private PocketCleanupAdmin() { }
 
-    /**
-     * Report all currently loaded, unclaimed BiomePockets dimensions. Nothing is
-     * removed by this overload.
-     */
+    /** Report all currently loaded, unclaimed BiomePockets dimensions. */
     public static int report(CommandSourceStack source) {
         List<Candidate> candidates = collect(source.getServer());
         if (candidates.isEmpty()) {
@@ -54,8 +50,8 @@ public final class PocketCleanupAdmin {
     }
 
     /**
-     * Remove only unclaimed pockets that are empty, old enough, not reserved as a
-     * Visit/Exit destination, and still pass the normal marker-backed teardown path.
+     * Remove only unclaimed pockets that are empty, old enough, not reserved for any
+     * reconnect/Visit return, and still pass the normal marker-backed teardown path.
      */
     public static int cleanup(CommandSourceStack source, int minimumAgeMinutes) {
         MinecraftServer server = source.getServer();
@@ -91,8 +87,7 @@ public final class PocketCleanupAdmin {
                         false);
             } else {
                 // teardownIfEmpty performs its own final reservation/player checks and
-                // strict marker/path validation. If any of those veto teardown, report
-                // the refusal rather than trying to bypass the safety layer.
+                // strict marker/path validation. Never bypass that safety layer.
                 source.sendSuccess(new TextComponent(
                         " - KEEP " + describe(candidate, minimumAgeMillis)
                                 + " [reason=teardown safety check refused removal]"),
@@ -121,7 +116,7 @@ public final class PocketCleanupAdmin {
 
             ServerLevel level = entry.getValue();
             MarkerAge markerAge = markerAge(server, dimension, now);
-            boolean returnReserved = PocketClaimManager.isProtectedReturnDimension(dimension);
+            boolean returnReserved = PocketDiagnostics.isReturnReserved(dimension);
 
             result.add(new Candidate(
                     dimension,
