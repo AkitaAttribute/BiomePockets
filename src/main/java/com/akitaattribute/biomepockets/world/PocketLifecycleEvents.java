@@ -28,16 +28,21 @@ public final class PocketLifecycleEvents {
             PocketClaimManager.handleDimensionChange(player, event.getFrom(), event.getTo());
             PocketPersistenceManager.handleDimensionChange(player, event.getFrom(), event.getTo());
 
+            // Mark actual arrivals, not merely created dimensions. This lets the
+            // periodic cleanup distinguish a pocket that has been used and later
+            // abandoned from one that is still being prepared asynchronously.
+            PocketDepartureCleanup.markEntered(event.getTo());
+
             // Claimed pockets are permanent. A temporary pocket saved as a Visit
             // return destination is also protected until Exit consumes that return.
             if (!PocketClaimManager.isClaimed(event.getFrom())
                     && !PocketClaimManager.isProtectedReturnDimension(event.getFrom())) {
                 PocketDimensionManager.handleDeparture(player.getServer(), event.getFrom());
 
-                // The immediate call can occur while ServerLevel.players() still has
-                // the player who is in the middle of switching dimensions. Retry after
-                // the transition has fully settled so temporary pockets cannot remain
-                // loaded merely because of event timing.
+                // Retain the short delayed retry, but it is no longer our only cleanup
+                // mechanism. The regular sweep will continue auditing an entered
+                // temporary pocket until teardown actually succeeds or it becomes
+                // legitimately protected.
                 PocketDepartureCleanup.schedule(event.getFrom());
             }
         }
