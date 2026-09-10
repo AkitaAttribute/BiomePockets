@@ -101,10 +101,26 @@ public final class PocketBiomeManagerScreen extends Screen {
             return 0;
         }
 
-        // 3x3 is expansion tier 1 (30-level equivalent), 5x5 is tier 2
-        // (60-level equivalent), etc. Charging is still performed in raw XP points.
-        int currentRadius = Math.max(1, (state.currentSize() - 1) / 2);
-        return currentRadius * 30;
+        // The server charges raw XP points. Display the highest vanilla experience
+        // level whose cumulative XP requirement is <= that raw cost. For example:
+        // 1395 XP = level 30 exactly, while 2790 XP = level 39 plus partial progress
+        // toward level 40, so the displayed equivalent is 39 rather than 60.
+        int rawXp = state.expansionCost();
+        int level = 0;
+        while (totalXpForLevel(level + 1) <= rawXp && level < 21863) {
+            level++;
+        }
+        return level;
+    }
+
+    private static long totalXpForLevel(int level) {
+        if (level <= 16) {
+            return (long) level * level + 6L * level;
+        }
+        if (level <= 31) {
+            return (5L * level * level - 81L * level + 720L) / 2L;
+        }
+        return (9L * level * level - 325L * level + 4440L) / 2L;
     }
 
     private Component expansionLabel() {
@@ -192,7 +208,7 @@ public final class PocketBiomeManagerScreen extends Screen {
 
             // Waystones uses one of the vanilla enchanting-table 1/2/3 requirement
             // sprites. Those sprites contain their numeral, so draw only the orb part
-            // of the first sprite and render our explicit 30/60/90... tier ourselves.
+            // of the first sprite and render our calculated level equivalent ourselves.
             RenderSystem.setShaderColor(1F, 1F, 1F, 1F);
             RenderSystem.setShaderTexture(0, ENCHANTMENT_TABLE_GUI);
 
