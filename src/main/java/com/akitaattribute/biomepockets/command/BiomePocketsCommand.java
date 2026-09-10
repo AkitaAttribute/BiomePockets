@@ -2,6 +2,7 @@ package com.akitaattribute.biomepockets.command;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.akitaattribute.biomepockets.registry.ModItems;
+import com.akitaattribute.biomepockets.world.PocketClaimManager;
 import com.akitaattribute.biomepockets.world.PocketDimensionManager;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -9,6 +10,7 @@ import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
+import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.core.Registry;
 import net.minecraft.network.chat.TextComponent;
 import net.minecraft.resources.ResourceKey;
@@ -44,12 +46,30 @@ public final class BiomePocketsCommand {
         event.getDispatcher().register(Commands.literal("biomepockets")
                 .then(Commands.literal("dimensions")
                         .executes(context -> listDimensions(context.getSource())))
+                .then(Commands.literal("expand")
+                        .executes(context -> expandPocket(
+                                context.getSource(),
+                                context.getSource().getPlayerOrException()))
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(context -> expandPocket(
+                                        context.getSource(),
+                                        EntityArgument.getPlayer(context, "player")))))
                 .then(Commands.argument("item", StringArgumentType.word())
                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(
                                 new String[] { TRANSPORTER, SELECTOR, MANAGER }, builder))
                         .executes(context -> giveItem(
                                 context.getSource().getPlayerOrException(),
                                 StringArgumentType.getString(context, "item")))));
+    }
+
+    private static int expandPocket(CommandSourceStack source, ServerPlayer target) {
+        PocketClaimManager.handleAction(target, PocketClaimManager.Action.EXPAND);
+        if (source.getEntity() != target) {
+            source.sendSuccess(
+                    new TextComponent("Requested biome pocket expansion for " + target.getGameProfile().getName() + "."),
+                    false);
+        }
+        return 1;
     }
 
     @SuppressWarnings("deprecation")
