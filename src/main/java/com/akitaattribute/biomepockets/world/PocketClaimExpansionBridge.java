@@ -83,7 +83,8 @@ final class PocketClaimExpansionBridge {
                 player.giveExperiencePoints(-cost);
             }
 
-            PocketClaimManager.writeGeometry(server, claimedDimension, newRadius, seed);
+            long canonicalSeed = PocketSeedPersistence.ensureSeed(server, claimedDimension, seed);
+            PocketClaimManager.writeGeometry(server, claimedDimension, newRadius, canonicalSeed);
             saveClaim(server, claim);
             state.expanding.remove(playerId);
 
@@ -110,8 +111,24 @@ final class PocketClaimExpansionBridge {
             for (Object claim : claims.values()) {
                 ResourceKey<Level> dimension = dimension(claim);
                 Field radiusField = claim.getClass().getDeclaredField("radius");
+                Field seedField = claim.getClass().getDeclaredField("seed");
                 radiusField.setAccessible(true);
+                seedField.setAccessible(true);
                 int radius = Math.max(1, radiusField.getInt(claim));
+                long claimSeed = seedField.getLong(claim);
+                long canonicalSeed = PocketSeedPersistence.ensureSeed(server, dimension, claimSeed);
+
+                // Legacy recovery could leave a claim pointing at a reconstructed
+                // runtime seed. Once a canonical sidecar exists, make the claim use
+                // that same seed for all future staging generation and persist the fix.
+                if (canonicalSeed != claimSeed) {
+                    seedField.setLong(claim, canonicalSeed);
+                    saveClaim(server, claim);
+                    BiomePockets.LOGGER.info(
+                            "Reconciled claimed pocket {} to its canonical generation seed",
+                            dimension.location());
+                }
+                PocketClaimManager.writeGeometry(server, dimension, radius, canonicalSeed);
 
                 ServerLevel level = server.getLevel(dimension);
                 if (level == null) {
