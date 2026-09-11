@@ -37,9 +37,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
 /**
- * Noise generator that produces real worldgen only in the configured 3x3 pocket and
+ * Noise generator that produces real worldgen only in the configured pocket square and
  * surrounds it with one complete chunk of solid barrier blocks on every horizontal
- * side. Chunks outside that 5x5 prepared square remain void.
+ * side. Chunks outside that prepared square remain void.
  *
  * Pocket biome population intentionally bypasses ChunkGenerator's normal multi-biome
  * feature-selection/indexing layer. A pocket already has one exact selected biome, so
@@ -49,10 +49,17 @@ import java.util.concurrent.Executor;
 public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenerator {
     private final Holder<Biome> pocketBiome;
     private final long pocketSeed;
-    private final int minPocketChunk;
-    private final int maxPocketChunk;
-    private final int minBarrierChunk;
-    private final int maxBarrierChunk;
+
+    /*
+     * Claimed pockets expand in place. The existing dimension keeps its identity while
+     * a staging dimension generates the newly unlocked ring. Once that ring has been
+     * copied into the claimed dimension these bounds are advanced atomically on the
+     * server thread so future containment checks reflect the new footprint.
+     */
+    private volatile int minPocketChunk;
+    private volatile int maxPocketChunk;
+    private volatile int minBarrierChunk;
+    private volatile int maxBarrierChunk;
     private boolean loggedFeaturePlan;
 
     public BoundedNoiseBasedChunkGenerator(
@@ -67,6 +74,31 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         super(structureSets, noiseParameters, biomeSource, seed, settings);
         this.pocketBiome = pocketBiome;
         this.pocketSeed = seed;
+        setPocketBounds(minPocketChunk, maxPocketChunk);
+    }
+
+    public int getPocketRadius() {
+        return Math.max(Math.abs(minPocketChunk), Math.abs(maxPocketChunk));
+    }
+
+    public long getPocketSeed() {
+        return pocketSeed;
+    }
+
+    /**
+     * Advance the playable square without regenerating the existing dimension. This is
+     * called only after the staging terrain and the replacement barrier ring have been
+     * copied successfully into the claimed level.
+     */
+    public void resizePocket(int radius) {
+        int safeRadius = Math.max(1, radius);
+        setPocketBounds(-safeRadius, safeRadius);
+    }
+
+    private void setPocketBounds(int minPocketChunk, int maxPocketChunk) {
+        if (minPocketChunk > maxPocketChunk) {
+            throw new IllegalArgumentException("Pocket minimum chunk cannot exceed maximum chunk");
+        }
         this.minPocketChunk = minPocketChunk;
         this.maxPocketChunk = maxPocketChunk;
         this.minBarrierChunk = minPocketChunk - 1;
@@ -105,10 +137,10 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     }
 
     /**
-     * Fills each of the 16 chunks surrounding the playable 3x3 area from build bottom
-     * to build top. Doing this directly on ChunkAccess during worldgen is much cheaper
-     * than issuing ~1.5 million live-world block updates, and it ensures neighboring
-     * barrier blocks already exist when edge trees/features evaluate placement.
+     * Fills each chunk surrounding the playable area from build bottom to build top.
+     * Doing this directly on ChunkAccess during worldgen is much cheaper than issuing
+     * live-world block updates, and neighboring barrier blocks already exist when edge
+     * trees/features evaluate placement.
      */
     private void fillBarrierChunk(ChunkAccess chunk) {
         ChunkPos chunkPos = chunk.getPos();
@@ -131,15 +163,11 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     }
 
     /**
-     * FEATURES has a one-chunk write radius, so any feature escaping the playable
-     * 3x3 can only damage the surrounding barrier ring. Some features (notably lakes
-     * and End islands) write directly and can replace barrier blocks. Once all nine
+     * FEATURES has a one-chunk write radius, so any feature escaping the playable area
+     * can only damage the surrounding barrier ring. Some features (notably lakes and
+     * End islands) write directly and can replace barrier blocks. Once all requested
      * playable chunks have finished FEATURES/FULL, the manager calls this method on
-     * the 16 ring chunks and the barrier becomes authoritative again.
-     *
-     * Untouched sections remain palette-compressed as all-barrier. maybeHas lets us
-     * skip those sections without scanning their 4096 positions, so cleanup cost is
-     * concentrated only in sections that a feature actually modified.
+     * the ring chunks and the barrier becomes authoritative again.
      */
     public int repairBarrierChunk(ChunkAccess chunk) {
         if (!isBarrierChunk(chunk)) {
@@ -240,8 +268,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         }
 
         ChunkPos chunkPos = chunk.getPos();
-        // Match vanilla ChunkPos#getWorldPosition(): decoration starts at the chunk's
-        // minimum X/Z with Y=0, even in dimensions whose minimum build height is -64.
         BlockPos origin = new BlockPos(chunkPos.getMinBlockX(), 0, chunkPos.getMinBlockZ());
 
         WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
@@ -330,12 +356,6 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         return 1;
     }
 
-    /**
-     * The vanilla central End biome contains worldgen entries that are part of the
-     * one-and-only vanilla End boss arena. A pocket may use End terrain/fog, but it is
-     * not the canonical minecraft:the_end level and must never recreate boss arena
-     * infrastructure there.
-     */
     private static boolean isVanillaEndBossFeature(Holder<PlacedFeature> feature) {
         return feature.unwrapKey().map(key -> {
             ResourceLocation id = key.location();
