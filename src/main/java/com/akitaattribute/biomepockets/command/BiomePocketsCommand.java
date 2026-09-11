@@ -57,11 +57,19 @@ public final class BiomePocketsCommand {
                                         context.getSource(),
                                         IntegerArgumentType.getInteger(context, "minimumAgeMinutes")))))
                 .then(Commands.literal("expand")
-                        .requires(source -> source.hasPermission(2))
+                        // The self-targeted debug form must remain registered for a
+                        // normal player command source, including single-player worlds
+                        // without cheats/operator permission. It still bypasses XP by
+                        // calling PocketAdminActions.expandWithoutXp().
                         .executes(context -> expandPocket(
                                 context.getSource(),
                                 context.getSource().getPlayerOrException()))
+                        // Explicitly targeting another player remains an operator/admin
+                        // action. Put the permission gate on this child only; gating the
+                        // parent literal makes Brigadier hide /biomepockets expand
+                        // entirely from non-op players.
                         .then(Commands.argument("player", EntityArgument.player())
+                                .requires(source -> source.hasPermission(2))
                                 .executes(context -> expandPocket(
                                         context.getSource(),
                                         EntityArgument.getPlayer(context, "player")))))
