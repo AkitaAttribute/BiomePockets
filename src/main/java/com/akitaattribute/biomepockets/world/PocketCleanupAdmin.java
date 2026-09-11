@@ -51,7 +51,8 @@ public final class PocketCleanupAdmin {
 
     /**
      * Remove only unclaimed pockets that are empty, old enough, not reserved for any
-     * reconnect/Visit return, and still pass the normal marker-backed teardown path.
+     * reconnect/Visit return, not an active expansion staging world, and still pass the
+     * normal marker-backed teardown path.
      */
     public static int cleanup(CommandSourceStack source, int minimumAgeMinutes) {
         MinecraftServer server = source.getServer();
@@ -86,8 +87,6 @@ public final class PocketCleanupAdmin {
                                 + " [players=0]"),
                         false);
             } else {
-                // teardownIfEmpty performs its own final reservation/player checks and
-                // strict marker/path validation. Never bypass that safety layer.
                 source.sendSuccess(new TextComponent(
                         " - KEEP " + describe(candidate, minimumAgeMillis)
                                 + " [reason=teardown safety check refused removal]"),
@@ -117,6 +116,7 @@ public final class PocketCleanupAdmin {
             ServerLevel level = entry.getValue();
             MarkerAge markerAge = markerAge(server, dimension, now);
             boolean returnReserved = PocketDiagnostics.isReturnReserved(dimension);
+            boolean activeStaging = PocketExpansionManager.isActiveStaging(dimension);
 
             result.add(new Candidate(
                     dimension,
@@ -124,6 +124,7 @@ public final class PocketCleanupAdmin {
                     markerAge.ageMillis(),
                     markerAge.valid(),
                     returnReserved,
+                    activeStaging,
                     PocketDiagnostics.describe(server, dimension)));
         }
 
@@ -134,6 +135,9 @@ public final class PocketCleanupAdmin {
     private static String ineligibleReason(Candidate candidate, long minimumAgeMillis) {
         if (candidate.players() > 0) {
             return "players present";
+        }
+        if (candidate.activeStaging()) {
+            return "active expansion staging";
         }
         if (candidate.returnReserved()) {
             return "return-reserved";
@@ -164,6 +168,7 @@ public final class PocketCleanupAdmin {
                 && candidate.ageMillis() >= 0L
                 && candidate.ageMillis() >= minimumAgeMillis
                 && candidate.players() == 0
+                && !candidate.activeStaging()
                 && !candidate.returnReserved()
                 && candidate.validMarker()) {
             text.append(" [eligible=yes]");
@@ -171,11 +176,6 @@ public final class PocketCleanupAdmin {
         return text.toString();
     }
 
-    /**
-     * The ownership marker is written once when the pocket is created and is not
-     * rewritten during normal persistence/recovery, so its timestamp is a stable
-     * creation-age source for both current and previously-created pockets.
-     */
     private static MarkerAge markerAge(
             MinecraftServer server,
             ResourceKey<Level> dimension,
@@ -231,6 +231,7 @@ public final class PocketCleanupAdmin {
             long ageMillis,
             boolean validMarker,
             boolean returnReserved,
+            boolean activeStaging,
             String diagnostics) { }
 
     private record MarkerAge(long ageMillis, boolean valid) { }
