@@ -85,11 +85,6 @@ public final class PocketLifecycleEvents {
         }
     }
 
-    /**
-     * Shared departure path for ordinary travel and death/respawn dimension changes.
-     * Claimed pockets and Visit return destinations remain protected; temporary pockets
-     * are torn down once the departed ServerLevel is actually empty.
-     */
     private static void handleActualDimensionDeparture(
             ServerPlayer player,
             ResourceKey<Level> from,
@@ -112,14 +107,9 @@ public final class PocketLifecycleEvents {
         if (event.getPlayer() instanceof ServerPlayer player) {
             RESPAWN_ORIGINS.remove(player.getUUID());
 
-            // If logout occurs inside the player's permanent pocket, preserve that
-            // exact location as the next Visit destination.
             PocketClaimManager.rememberCurrentPocketPosition(player);
             PocketClaimManager.saveAll(player.getServer());
 
-            // Both reservations are non-destructive. The in-memory copy handles a
-            // normal reconnect; the disk-backed copy survives integrated/dedicated
-            // server shutdown and process restart.
             PocketDimensionManager.rememberDisconnect(player);
             PocketPersistenceManager.rememberDisconnect(player);
         }
@@ -139,6 +129,11 @@ public final class PocketLifecycleEvents {
         RESPAWN_ORIGINS.clear();
         PocketPersistenceManager.recoverPockets(event.getServer());
         PocketClaimManager.load(event.getServer());
+
+        // Persistence reconstructs dynamic levels before the private claim records are
+        // loaded. Restore each claimed generator's logical radius from that claim so an
+        // expanded 5x5/7x7 pocket keeps the same bounds after a server restart.
+        PocketClaimExpansionBridge.syncLoadedClaimGeometry(event.getServer());
 
         // This is not runtime polling. It is a one-time recovery cleanup for stale
         // temporary pockets left by older builds or an interrupted previous session,
