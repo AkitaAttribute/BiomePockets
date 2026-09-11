@@ -35,7 +35,6 @@ import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
-import net.minecraft.world.level.storage.DerivedLevelData;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.WorldData;
@@ -294,12 +293,6 @@ public final class PocketExpansionManager {
         }));
     }
 
-    /**
-     * Replays differences from the old claimed square into the newly generated pocket.
-     * The outer ring remains freshly generated and correctly lit. Existing blocks are
-     * compared before writing, so normal terrain that matches the same-seed replacement
-     * incurs no live-world block update.
-     */
     private static void migratePlayableArea(ServerLevel oldLevel, ServerLevel newLevel, int oldRadius) {
         int minY = Math.max(oldLevel.getMinBuildHeight(), newLevel.getMinBuildHeight());
         int maxY = Math.min(oldLevel.getMaxBuildHeight(), newLevel.getMaxBuildHeight());
@@ -436,7 +429,7 @@ public final class PocketExpansionManager {
         ChunkProgressListener progressListener = server.progressListenerFactory.create(11);
         Executor executor = server.executor;
         LevelStorageSource.LevelStorageAccess storageSource = server.storageSource;
-        DerivedLevelData derivedLevelData = new DerivedLevelData(worldData, worldData.overworldData());
+        PocketServerLevelData derivedLevelData = new PocketServerLevelData(worldData, worldData.overworldData());
 
         ServerLevel newLevel = new ServerLevel(
                 server,
