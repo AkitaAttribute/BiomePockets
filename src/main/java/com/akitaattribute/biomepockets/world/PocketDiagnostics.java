@@ -24,6 +24,7 @@ public final class PocketDiagnostics {
         ResourceLocation biome = ownedBiome(dimension);
         UUID owner = claimOwner(dimension);
         boolean returnReserved = isReturnReserved(dimension);
+        boolean activeStaging = PocketExpansionManager.isActiveStaging(dimension);
 
         StringBuilder result = new StringBuilder(" [BiomePockets-owned]");
         if (owner != null) {
@@ -32,6 +33,8 @@ public final class PocketDiagnostics {
             result.append(" [owner=")
                     .append(onlineOwner != null ? onlineOwner.getGameProfile().getName() : owner)
                     .append(']');
+        } else if (activeStaging) {
+            result.append(" [type=expansion-staging]");
         } else if (returnReserved) {
             result.append(" [type=return-reserved]");
         } else {
