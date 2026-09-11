@@ -4,11 +4,14 @@ import com.akitaattribute.biomepockets.BiomePockets;
 import com.google.common.collect.ImmutableList;
 import com.mojang.datafixers.util.Either;
 import com.mojang.serialization.Lifecycle;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.WritableRegistry;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -24,16 +27,18 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.FixedBiomeSource;
-import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
+import net.minecraft.world.level.levelgen.feature.ConfiguredStructureFeature;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -53,22 +58,31 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Generates a larger same-biome/same-seed replacement pocket and migrates the old
- * playable square into it. This avoids trying to turn already-FULL barrier chunks
- * back into normal worldgen chunks in-place, which Minecraft's chunk pipeline is not
- * designed to do.
+ * Expands a permanent pocket without replacing its dimension.
+ *
+ * A disposable staging level is generated with the claimed pocket's original biome
+ * and seed. Only the newly unlocked playable ring and its new outer barrier ring are
+ * copied into the existing claimed ServerLevel. Existing playable chunks are never
+ * overwritten, so player builds remain untouched and the claimed dimension key stays
+ * stable for beds, maps, Visit/Exit state, and other dimension-keyed data.
  */
 public final class PocketExpansionManager {
     private static final String POCKET_PREFIX = "pocket_";
+    private static final String STAGING_PREFIX = "pocket_staging_";
     private static final String MARKER_FILE = ".biomepockets-owned";
     private static final String PERSISTENCE_FILE = ".biomepockets-meta.properties";
 
@@ -77,11 +91,20 @@ public final class PocketExpansionManager {
             Comparator.comparing(ResourceLocation::toString));
     private static final int TICKET_RADIUS = 1;
 
+    // Protect active staging dimensions from the explicit admin cleanup command. After
+    // a crash/restart this set is naturally empty, allowing startup stale cleanup to
+    // remove an abandoned staging dimension through the normal ownership safeguards.
+    private static final Set<ResourceKey<Level>> ACTIVE_STAGING = ConcurrentHashMap.newKeySet();
+
     private PocketExpansionManager() { }
+
+    public static boolean isActiveStaging(ResourceKey<Level> dimension) {
+        return ACTIVE_STAGING.contains(dimension);
+    }
 
     public static void expand(
             ServerPlayer requester,
-            ResourceKey<Level> oldDimension,
+            ResourceKey<Level> claimedDimension,
             ResourceLocation biomeId,
             long seed,
             int oldRadius,
@@ -90,260 +113,533 @@ public final class PocketExpansionManager {
         MinecraftServer server = requester.getServer();
         Optional<Holder<Biome>> biome = BiomeCatalog.getBiome(server, biomeId);
         if (biome.isEmpty()) {
-            PocketClaimManager.expansionFailed(server, requester.getUUID(), "Expansion failed: biome is no longer registered.");
+            PocketClaimManager.expansionFailed(
+                    server,
+                    requester.getUUID(),
+                    "Expansion failed: biome is no longer registered.");
             return;
         }
 
-        ResourceLocation dimensionId = new ResourceLocation(
+        ServerLevel claimedLevel = server.getLevel(claimedDimension);
+        if (claimedLevel == null
+                || !(claimedLevel.getChunkSource().getGenerator() instanceof BoundedNoiseBasedChunkGenerator)) {
+            PocketClaimManager.expansionFailed(
+                    server,
+                    requester.getUUID(),
+                    "Expansion failed: claimed pocket is not currently available.");
+            return;
+        }
+
+        ResourceLocation stagingId = new ResourceLocation(
                 BiomePockets.MOD_ID,
-                POCKET_PREFIX + UUID.randomUUID().toString().replace("-", ""));
-        ResourceKey<Level> newDimension = ResourceKey.create(Registry.DIMENSION_REGISTRY, dimensionId);
+                STAGING_PREFIX + UUID.randomUUID().toString().replace("-", ""));
+        ResourceKey<Level> stagingDimension = ResourceKey.create(Registry.DIMENSION_REGISTRY, stagingId);
 
         try {
-            ServerLevel expanded = createLevel(server, newDimension, biome.get(), seed, newRadius);
-            Path folder = pocketFolder(server, newDimension);
-            writeOwnershipMarker(newDimension, folder);
-            adoptOwnedPocket(newDimension, biomeId, folder);
-            writePersistenceMetadata(newDimension, biomeId, folder);
-            PocketClaimManager.writeGeometry(server, newDimension, newRadius, seed);
+            ServerLevel staging = createLevel(server, stagingDimension, biome.get(), seed, newRadius);
+            Path folder = pocketFolder(server, stagingDimension);
+            writeOwnershipMarker(stagingDimension, folder);
+            adoptOwnedPocket(stagingDimension, biomeId, folder);
+            writePersistenceMetadata(stagingDimension, biomeId, folder);
+            PocketClaimManager.writeGeometry(server, stagingDimension, newRadius, seed);
+            ACTIVE_STAGING.add(stagingDimension);
 
-            prepareExpandedPocketAsync(
+            prepareStagingAsync(
                     server,
-                    expanded,
-                    oldDimension,
-                    newDimension,
+                    staging,
+                    stagingDimension,
+                    claimedDimension,
                     requester.getUUID(),
                     oldRadius,
                     newRadius,
+                    seed,
                     cost);
         } catch (Exception exception) {
-            BiomePockets.LOGGER.error("Could not create expanded pocket {}", newDimension.location(), exception);
-            PocketClaimManager.expansionFailed(server, requester.getUUID(), "Biome pocket expansion failed. See server log.");
-            PocketDimensionManager.teardownIfEmpty(server, newDimension);
-        }
-    }
-
-    private static void prepareExpandedPocketAsync(
-            MinecraftServer server,
-            ServerLevel expanded,
-            ResourceKey<Level> oldDimension,
-            ResourceKey<Level> newDimension,
-            UUID playerId,
-            int oldRadius,
-            int newRadius,
-            int cost) {
-        ServerChunkCache chunkSource = expanded.getChunkSource();
-        ResourceLocation ticketOwner = newDimension.location();
-        int width = newRadius * 2 + 1;
-        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> playableFutures =
-                new ArrayList<>(width * width);
-
-        for (int chunkX = -newRadius; chunkX <= newRadius; chunkX++) {
-            for (int chunkZ = -newRadius; chunkZ <= newRadius; chunkZ++) {
-                ChunkPos pos = new ChunkPos(chunkX, chunkZ);
-                chunkSource.addRegionTicket(EXPANSION_TICKET, pos, TICKET_RADIUS, ticketOwner);
-                playableFutures.add(chunkSource.getChunkFuture(chunkX, chunkZ, ChunkStatus.FULL, true));
-            }
-        }
-
-        CompletableFuture<Void> allPlayable = CompletableFuture.allOf(
-                playableFutures.toArray(new CompletableFuture<?>[0]));
-        allPlayable.whenComplete((ignored, throwable) -> server.execute(() -> {
-            if (server.getLevel(newDimension) != expanded) {
-                return;
-            }
-            if (throwable != null || !allSucceeded(playableFutures)) {
-                failAndCleanup(
-                        server,
-                        expanded,
-                        newDimension,
-                        playerId,
-                        newRadius,
-                        ticketOwner,
-                        "Biome pocket expansion terrain generation failed.",
-                        throwable);
-                return;
-            }
-
-            prepareBarrierRingAsync(
+            ACTIVE_STAGING.remove(stagingDimension);
+            BiomePockets.LOGGER.error("Could not create expansion staging pocket {}", stagingId, exception);
+            PocketClaimManager.expansionFailed(
                     server,
-                    expanded,
-                    oldDimension,
-                    newDimension,
-                    playerId,
-                    oldRadius,
-                    newRadius,
-                    cost,
-                    ticketOwner);
-        }));
+                    requester.getUUID(),
+                    "Biome pocket expansion failed while creating staging terrain.");
+            PocketDimensionManager.teardownIfEmpty(server, stagingDimension);
+        }
     }
 
-    private static void prepareBarrierRingAsync(
+    private static void prepareStagingAsync(
             MinecraftServer server,
-            ServerLevel expanded,
-            ResourceKey<Level> oldDimension,
-            ResourceKey<Level> newDimension,
+            ServerLevel staging,
+            ResourceKey<Level> stagingDimension,
+            ResourceKey<Level> claimedDimension,
             UUID playerId,
             int oldRadius,
             int newRadius,
+            long seed,
+            int cost) {
+        List<ChunkPos> playableRing = ring(newRadius);
+        List<ChunkPos> barrierRing = ring(newRadius + 1);
+        List<ChunkPos> affected = concat(playableRing, barrierRing);
+        ResourceLocation ticketOwner = stagingDimension.location();
+        ServerChunkCache chunkSource = staging.getChunkSource();
+        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> futures =
+                requestFullChunks(chunkSource, affected, ticketOwner);
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture<?>[0]))
+                .whenComplete((ignored, throwable) -> server.execute(() -> {
+                    if (server.getLevel(stagingDimension) != staging) {
+                        return;
+                    }
+                    if (throwable != null || !allSucceeded(futures)) {
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                null,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion staging generation failed.",
+                                throwable);
+                        return;
+                    }
+
+                    if (!(staging.getChunkSource().getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                null,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion staging generator became unavailable.",
+                                null);
+                        return;
+                    }
+
+                    int repaired = 0;
+                    for (ChunkPos pos : barrierRing) {
+                        repaired += generator.repairBarrierChunk(staging.getChunk(pos.x, pos.z));
+                    }
+                    int removedVines = generator.removeBarrierSupportedVines(staging);
+                    if (repaired > 0 || removedVines > 0) {
+                        BiomePockets.LOGGER.info(
+                                "Expansion staging {} repaired {} barrier blocks and removed {} wall vines",
+                                stagingDimension.location(),
+                                repaired,
+                                removedVines);
+                    }
+
+                    if (!PocketClaimExpansionBridge.canCommit(server, playerId, claimedDimension, cost)) {
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                null,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion was cancelled before applying staging terrain.",
+                                null);
+                        return;
+                    }
+
+                    Map<ChunkPos, ChunkSnapshot> stagedSnapshots = snapshotChunks(staging, affected);
+                    prepareTargetAsync(
+                            server,
+                            staging,
+                            stagingDimension,
+                            claimedDimension,
+                            playerId,
+                            oldRadius,
+                            newRadius,
+                            seed,
+                            cost,
+                            ticketOwner,
+                            affected,
+                            stagedSnapshots);
+                }));
+    }
+
+    private static void prepareTargetAsync(
+            MinecraftServer server,
+            ServerLevel staging,
+            ResourceKey<Level> stagingDimension,
+            ResourceKey<Level> claimedDimension,
+            UUID playerId,
+            int oldRadius,
+            int newRadius,
+            long seed,
             int cost,
-            ResourceLocation ticketOwner) {
-        ServerChunkCache chunkSource = expanded.getChunkSource();
-        if (!(chunkSource.getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
+            ResourceLocation ticketOwner,
+            List<ChunkPos> affected,
+            Map<ChunkPos, ChunkSnapshot> stagedSnapshots) {
+        ServerLevel target = server.getLevel(claimedDimension);
+        if (target == null) {
             failAndCleanup(
                     server,
-                    expanded,
-                    newDimension,
+                    staging,
+                    stagingDimension,
+                    null,
+                    affected,
                     playerId,
-                    newRadius,
                     ticketOwner,
-                    "Biome pocket expansion lost its bounded generator.",
+                    "Biome pocket expansion was cancelled because the claimed pocket is unavailable.",
                     null);
             return;
         }
 
-        int barrierRadius = newRadius + 1;
-        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> barrierFutures =
-                new ArrayList<>(barrierRadius * 8);
-        for (int chunkX = -barrierRadius; chunkX <= barrierRadius; chunkX++) {
-            for (int chunkZ = -barrierRadius; chunkZ <= barrierRadius; chunkZ++) {
-                if (Math.abs(chunkX) <= newRadius && Math.abs(chunkZ) <= newRadius) {
-                    continue;
-                }
-                barrierFutures.add(chunkSource.getChunkFuture(chunkX, chunkZ, ChunkStatus.FEATURES, true));
-            }
-        }
+        ServerChunkCache targetSource = target.getChunkSource();
+        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> targetFutures =
+                requestFullChunks(targetSource, affected, ticketOwner);
 
-        CompletableFuture<Void> allBarrier = CompletableFuture.allOf(
-                barrierFutures.toArray(new CompletableFuture<?>[0]));
-        allBarrier.whenComplete((ignored, throwable) -> server.execute(() -> {
-            if (server.getLevel(newDimension) != expanded) {
-                return;
-            }
-            if (throwable != null || !allSucceeded(barrierFutures)) {
-                failAndCleanup(
-                        server,
-                        expanded,
-                        newDimension,
-                        playerId,
-                        newRadius,
-                        ticketOwner,
-                        "Biome pocket expansion containment generation failed.",
-                        throwable);
-                return;
-            }
+        CompletableFuture.allOf(targetFutures.toArray(new CompletableFuture<?>[0]))
+                .whenComplete((ignored, throwable) -> server.execute(() -> {
+                    if (server.getLevel(stagingDimension) != staging
+                            || server.getLevel(claimedDimension) != target) {
+                        return;
+                    }
+                    if (throwable != null || !allSucceeded(targetFutures)) {
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion could not prepare the destination chunks.",
+                                throwable);
+                        return;
+                    }
+                    if (!PocketClaimExpansionBridge.canCommit(server, playerId, claimedDimension, cost)) {
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion was cancelled before modifying the claimed pocket.",
+                                null);
+                        return;
+                    }
+                    if (!(targetSource.getGenerator() instanceof BoundedNoiseBasedChunkGenerator targetGenerator)) {
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion destination generator is unavailable.",
+                                null);
+                        return;
+                    }
 
-            int repaired = 0;
-            for (CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future : barrierFutures) {
-                Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure> result = future.getNow(null);
-                if (result != null && result.left().isPresent()) {
-                    repaired += generator.repairBarrierChunk(result.left().get());
-                }
-            }
-            int removedVines = generator.removeBarrierSupportedVines(expanded);
-            if (repaired > 0 || removedVines > 0) {
-                BiomePockets.LOGGER.info(
-                        "Expanded pocket {} containment repaired {} blocks and removed {} wall vines",
-                        newDimension.location(),
-                        repaired,
-                        removedVines);
-            }
+                    Map<ChunkPos, ChunkSnapshot> rollbackSnapshots = snapshotChunks(target, affected);
+                    List<LevelChunk> changedChunks = new ArrayList<>(affected.size());
+                    try {
+                        for (ChunkPos pos : affected) {
+                            LevelChunk targetChunk = target.getChunk(pos.x, pos.z);
+                            ChunkSnapshot source = stagedSnapshots.get(pos);
+                            if (source == null) {
+                                throw new IllegalStateException("Missing staging snapshot for " + pos);
+                            }
+                            applySnapshot(targetChunk, source);
+                            changedChunks.add(targetChunk);
+                        }
+                        targetGenerator.resizePocket(newRadius);
+                    } catch (Exception exception) {
+                        restoreSnapshots(target, rollbackSnapshots);
+                        targetGenerator.resizePocket(oldRadius);
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion failed while copying staging terrain.",
+                                exception);
+                        return;
+                    }
 
-            ServerLevel oldLevel = server.getLevel(oldDimension);
-            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-            if (oldLevel == null || player == null) {
-                failAndCleanup(
-                        server,
-                        expanded,
-                        newDimension,
-                        playerId,
-                        newRadius,
-                        ticketOwner,
-                        "Biome pocket expansion was cancelled because the original pocket or player is unavailable.",
-                        null);
-                return;
-            }
-
-            try {
-                migratePlayableArea(oldLevel, expanded, oldRadius);
-                removeTickets(expanded, newRadius, ticketOwner);
-                PocketClaimManager.completeExpansion(
-                        server,
-                        playerId,
-                        oldDimension,
-                        newDimension,
-                        newRadius,
-                        cost);
-            } catch (Exception exception) {
-                BiomePockets.LOGGER.error(
-                        "Could not migrate claimed pocket {} into expanded pocket {}",
-                        oldDimension.location(),
-                        newDimension.location(),
-                        exception);
-                failAndCleanup(
-                        server,
-                        expanded,
-                        newDimension,
-                        playerId,
-                        newRadius,
-                        ticketOwner,
-                        "Biome pocket expansion failed while preserving existing contents.",
-                        exception);
-            }
-        }));
+                    relightAndCommit(
+                            server,
+                            staging,
+                            stagingDimension,
+                            target,
+                            claimedDimension,
+                            playerId,
+                            oldRadius,
+                            newRadius,
+                            seed,
+                            cost,
+                            ticketOwner,
+                            affected,
+                            changedChunks,
+                            rollbackSnapshots,
+                            targetGenerator);
+                }));
     }
 
-    private static void migratePlayableArea(ServerLevel oldLevel, ServerLevel newLevel, int oldRadius) {
-        int minY = Math.max(oldLevel.getMinBuildHeight(), newLevel.getMinBuildHeight());
-        int maxY = Math.min(oldLevel.getMaxBuildHeight(), newLevel.getMaxBuildHeight());
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        int changedBlocks = 0;
-        int copiedBlockEntities = 0;
+    private static void relightAndCommit(
+            MinecraftServer server,
+            ServerLevel staging,
+            ResourceKey<Level> stagingDimension,
+            ServerLevel target,
+            ResourceKey<Level> claimedDimension,
+            UUID playerId,
+            int oldRadius,
+            int newRadius,
+            long seed,
+            int cost,
+            ResourceLocation ticketOwner,
+            List<ChunkPos> affected,
+            List<LevelChunk> changedChunks,
+            Map<ChunkPos, ChunkSnapshot> rollbackSnapshots,
+            BoundedNoiseBasedChunkGenerator targetGenerator) {
+        List<CompletableFuture<ChunkAccess>> lightFutures = new ArrayList<>(changedChunks.size());
+        for (LevelChunk chunk : changedChunks) {
+            chunk.setLightCorrect(false);
+            lightFutures.add(target.getChunkSource().getLightEngine().lightChunk(chunk, false));
+        }
 
-        for (int chunkX = -oldRadius; chunkX <= oldRadius; chunkX++) {
-            for (int chunkZ = -oldRadius; chunkZ <= oldRadius; chunkZ++) {
-                LevelChunk oldChunk = oldLevel.getChunk(chunkX, chunkZ);
-                LevelChunk newChunk = newLevel.getChunk(chunkX, chunkZ);
-                int minX = chunkX << 4;
-                int minZ = chunkZ << 4;
+        CompletableFuture.allOf(lightFutures.toArray(new CompletableFuture<?>[0]))
+                .whenComplete((ignored, throwable) -> server.execute(() -> {
+                    if (throwable != null) {
+                        restoreSnapshots(target, rollbackSnapshots);
+                        targetGenerator.resizePocket(oldRadius);
+                        relightBestEffort(target, affected);
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion failed while lighting copied terrain.",
+                                throwable);
+                        return;
+                    }
 
-                for (int y = minY; y < maxY; y++) {
-                    for (int localZ = 0; localZ < 16; localZ++) {
-                        for (int localX = 0; localX < 16; localX++) {
-                            pos.set(minX + localX, y, minZ + localZ);
-                            BlockState oldState = oldChunk.getBlockState(pos);
-                            BlockState newState = newChunk.getBlockState(pos);
-                            if (!oldState.equals(newState)) {
-                                newLevel.setBlock(pos, oldState, 2);
-                                changedBlocks++;
-                            }
-                        }
+                    if (!PocketClaimExpansionBridge.canCommit(server, playerId, claimedDimension, cost)) {
+                        restoreSnapshots(target, rollbackSnapshots);
+                        targetGenerator.resizePocket(oldRadius);
+                        relightBestEffort(target, affected);
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion was cancelled before saving the expanded claim.",
+                                null);
+                        return;
                     }
-                }
 
-                for (BlockPos blockEntityPos : oldChunk.getBlockEntitiesPos()) {
-                    CompoundTag tag = oldChunk.getBlockEntityNbtForSaving(blockEntityPos);
-                    if (tag == null) {
-                        continue;
+                    if (!PocketClaimExpansionBridge.commit(
+                            server,
+                            playerId,
+                            claimedDimension,
+                            newRadius,
+                            seed,
+                            cost)) {
+                        restoreSnapshots(target, rollbackSnapshots);
+                        targetGenerator.resizePocket(oldRadius);
+                        relightBestEffort(target, affected);
+                        failAndCleanup(
+                                server,
+                                staging,
+                                stagingDimension,
+                                target,
+                                affected,
+                                playerId,
+                                ticketOwner,
+                                "Biome pocket expansion could not save the expanded claim.",
+                                null);
+                        return;
                     }
-                    BlockEntity target = newLevel.getBlockEntity(blockEntityPos);
-                    if (target != null) {
-                        target.load(tag.copy());
-                        target.setChanged();
-                        copiedBlockEntities++;
-                    } else {
-                        newChunk.setBlockEntityNbt(tag.copy());
-                        copiedBlockEntities++;
-                    }
-                }
-                newChunk.setUnsaved(true);
+
+                    refreshClientChunks(target, changedChunks);
+                    removeTickets(staging, affected, ticketOwner);
+                    removeTickets(target, affected, ticketOwner);
+                    ACTIVE_STAGING.remove(stagingDimension);
+                    PocketDimensionManager.teardownIfEmpty(server, stagingDimension);
+
+                    BiomePockets.LOGGER.info(
+                            "Expanded claimed pocket {} in place from {}x{} to {}x{} using staging {}",
+                            claimedDimension.location(),
+                            oldRadius * 2 + 1,
+                            oldRadius * 2 + 1,
+                            newRadius * 2 + 1,
+                            newRadius * 2 + 1,
+                            stagingDimension.location());
+                }));
+    }
+
+    private static void refreshClientChunks(ServerLevel level, List<LevelChunk> chunks) {
+        if (level.players().isEmpty()) {
+            return;
+        }
+        for (LevelChunk chunk : chunks) {
+            ClientboundLevelChunkWithLightPacket packet = new ClientboundLevelChunkWithLightPacket(
+                    chunk,
+                    level.getChunkSource().getLightEngine(),
+                    null,
+                    null,
+                    true);
+            for (ServerPlayer player : level.players()) {
+                player.connection.send(packet);
+            }
+        }
+    }
+
+    private static Map<ChunkPos, ChunkSnapshot> snapshotChunks(ServerLevel level, List<ChunkPos> positions) {
+        Map<ChunkPos, ChunkSnapshot> snapshots = new LinkedHashMap<>();
+        for (ChunkPos pos : positions) {
+            LevelChunk chunk = level.getChunk(pos.x, pos.z);
+            snapshots.put(pos, snapshot(chunk));
+        }
+        return snapshots;
+    }
+
+    private static ChunkSnapshot snapshot(LevelChunk chunk) {
+        LevelChunkSection[] sourceSections = chunk.getSections();
+        LevelChunkSection[] sections = new LevelChunkSection[sourceSections.length];
+        for (int i = 0; i < sourceSections.length; i++) {
+            LevelChunkSection section = sourceSections[i];
+            sections[i] = new LevelChunkSection(
+                    section.bottomBlockY(),
+                    section.getStates().copy(),
+                    section.getBiomes().copy());
+        }
+
+        Map<BlockPos, CompoundTag> blockEntities = new HashMap<>();
+        for (BlockPos pos : chunk.getBlockEntitiesPos()) {
+            CompoundTag tag = chunk.getBlockEntityNbtForSaving(pos);
+            if (tag != null) {
+                blockEntities.put(pos.immutable(), tag.copy());
             }
         }
 
-        BiomePockets.LOGGER.info(
-                "Migrated claimed pocket contents: {} differing blocks and {} block entities",
-                changedBlocks,
-                copiedBlockEntities);
+        Map<Heightmap.Types, long[]> heightmaps = new EnumMap<>(Heightmap.Types.class);
+        for (Map.Entry<Heightmap.Types, Heightmap> entry : chunk.getHeightmaps()) {
+            heightmaps.put(entry.getKey(), entry.getValue().getRawData().clone());
+        }
+
+        Map<ConfiguredStructureFeature<?, ?>, StructureStart> starts =
+                new HashMap<>(chunk.getAllStarts());
+        Map<ConfiguredStructureFeature<?, ?>, LongSet> references = new HashMap<>();
+        for (Map.Entry<ConfiguredStructureFeature<?, ?>, LongSet> entry : chunk.getAllReferences().entrySet()) {
+            references.put(entry.getKey(), new LongOpenHashSet(entry.getValue()));
+        }
+
+        return new ChunkSnapshot(
+                sections,
+                blockEntities,
+                heightmaps,
+                starts,
+                references,
+                chunk.getInhabitedTime());
+    }
+
+    private static void applySnapshot(LevelChunk target, ChunkSnapshot snapshot) {
+        LevelChunkSection[] destinationSections = target.getSections();
+        if (destinationSections.length != snapshot.sections().length) {
+            throw new IllegalStateException("Chunk section count differs between staging and claimed pocket");
+        }
+
+        target.clearAllBlockEntities();
+        for (int i = 0; i < destinationSections.length; i++) {
+            LevelChunkSection section = snapshot.sections()[i];
+            destinationSections[i] = new LevelChunkSection(
+                    section.bottomBlockY(),
+                    section.getStates().copy(),
+                    section.getBiomes().copy());
+        }
+
+        for (Map.Entry<Heightmap.Types, long[]> entry : snapshot.heightmaps().entrySet()) {
+            target.setHeightmap(entry.getKey(), entry.getValue().clone());
+        }
+        target.setAllStarts(new HashMap<>(snapshot.starts()));
+
+        Map<ConfiguredStructureFeature<?, ?>, LongSet> references = new HashMap<>();
+        for (Map.Entry<ConfiguredStructureFeature<?, ?>, LongSet> entry : snapshot.references().entrySet()) {
+            references.put(entry.getKey(), new LongOpenHashSet(entry.getValue()));
+        }
+        target.setAllReferences(references);
+
+        for (Map.Entry<BlockPos, CompoundTag> entry : snapshot.blockEntities().entrySet()) {
+            target.setBlockEntityNbt(entry.getValue().copy());
+            target.getBlockEntity(entry.getKey(), LevelChunk.EntityCreationType.IMMEDIATE);
+        }
+
+        target.setInhabitedTime(snapshot.inhabitedTime());
+        target.setLightCorrect(false);
+        target.setUnsaved(true);
+    }
+
+    private static void restoreSnapshots(ServerLevel target, Map<ChunkPos, ChunkSnapshot> snapshots) {
+        for (Map.Entry<ChunkPos, ChunkSnapshot> entry : snapshots.entrySet()) {
+            ChunkPos pos = entry.getKey();
+            applySnapshot(target.getChunk(pos.x, pos.z), entry.getValue());
+        }
+    }
+
+    private static void relightBestEffort(ServerLevel level, List<ChunkPos> positions) {
+        for (ChunkPos pos : positions) {
+            try {
+                LevelChunk chunk = level.getChunk(pos.x, pos.z);
+                chunk.setLightCorrect(false);
+                level.getChunkSource().getLightEngine().lightChunk(chunk, false);
+            } catch (Exception exception) {
+                BiomePockets.LOGGER.warn("Could not relight rolled-back chunk {}", pos, exception);
+            }
+        }
+    }
+
+    private static List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> requestFullChunks(
+            ServerChunkCache chunkSource,
+            List<ChunkPos> positions,
+            ResourceLocation ticketOwner) {
+        List<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> futures =
+                new ArrayList<>(positions.size());
+        for (ChunkPos pos : positions) {
+            chunkSource.addRegionTicket(EXPANSION_TICKET, pos, TICKET_RADIUS, ticketOwner);
+            futures.add(chunkSource.getChunkFuture(pos.x, pos.z, ChunkStatus.FULL, true));
+        }
+        return futures;
+    }
+
+    private static List<ChunkPos> ring(int radius) {
+        List<ChunkPos> positions = new ArrayList<>(Math.max(1, radius * 8));
+        for (int x = -radius; x <= radius; x++) {
+            positions.add(new ChunkPos(x, -radius));
+            if (radius != 0) {
+                positions.add(new ChunkPos(x, radius));
+            }
+        }
+        for (int z = -radius + 1; z <= radius - 1; z++) {
+            positions.add(new ChunkPos(-radius, z));
+            if (radius != 0) {
+                positions.add(new ChunkPos(radius, z));
+            }
+        }
+        return positions;
+    }
+
+    private static List<ChunkPos> concat(List<ChunkPos> first, List<ChunkPos> second) {
+        List<ChunkPos> result = new ArrayList<>(first.size() + second.size());
+        result.addAll(first);
+        result.addAll(second);
+        return result;
     }
 
     private static boolean allSucceeded(
@@ -357,34 +653,38 @@ public final class PocketExpansionManager {
         return true;
     }
 
-    private static void removeTickets(ServerLevel level, int radius, ResourceLocation ticketOwner) {
+    private static void removeTickets(
+            ServerLevel level,
+            List<ChunkPos> positions,
+            ResourceLocation ticketOwner) {
         ServerChunkCache chunkSource = level.getChunkSource();
-        for (int chunkX = -radius; chunkX <= radius; chunkX++) {
-            for (int chunkZ = -radius; chunkZ <= radius; chunkZ++) {
-                chunkSource.removeRegionTicket(
-                        EXPANSION_TICKET,
-                        new ChunkPos(chunkX, chunkZ),
-                        TICKET_RADIUS,
-                        ticketOwner);
-            }
+        for (ChunkPos pos : positions) {
+            chunkSource.removeRegionTicket(EXPANSION_TICKET, pos, TICKET_RADIUS, ticketOwner);
         }
     }
 
     private static void failAndCleanup(
             MinecraftServer server,
-            ServerLevel level,
-            ResourceKey<Level> dimension,
+            ServerLevel staging,
+            ResourceKey<Level> stagingDimension,
+            ServerLevel target,
+            List<ChunkPos> affected,
             UUID playerId,
-            int radius,
             ResourceLocation ticketOwner,
             String message,
             Throwable throwable) {
         if (throwable != null) {
             BiomePockets.LOGGER.error(message, throwable);
+        } else {
+            BiomePockets.LOGGER.warn(message);
         }
-        removeTickets(level, radius, ticketOwner);
+        removeTickets(staging, affected, ticketOwner);
+        if (target != null) {
+            removeTickets(target, affected, ticketOwner);
+        }
+        ACTIVE_STAGING.remove(stagingDimension);
         PocketClaimManager.expansionFailed(server, playerId, message);
-        PocketDimensionManager.teardownIfEmpty(server, dimension);
+        PocketDimensionManager.teardownIfEmpty(server, stagingDimension);
     }
 
     @SuppressWarnings({"deprecation", "removal"})
@@ -396,7 +696,7 @@ public final class PocketExpansionManager {
             int radius) {
         Map<ResourceKey<Level>, ServerLevel> worlds = server.forgeGetWorldMap();
         if (worlds.containsKey(levelKey)) {
-            throw new IllegalStateException("Expanded pocket dimension already exists: " + levelKey.location());
+            throw new IllegalStateException("Expansion staging dimension already exists: " + levelKey.location());
         }
 
         Registry<StructureSet> structureSets = server.registryAccess().registryOrThrow(Registry.STRUCTURE_SET_REGISTRY);
@@ -412,10 +712,10 @@ public final class PocketExpansionManager {
                 biomeSource,
                 biome,
                 seed,
-                noiseSettings.getHolderOrThrow(profile.noiseSettings),
+                noiseSettings.getHolderOrThrow(profile.noiseSettings()),
                 -radius,
                 radius);
-        LevelStem stem = new LevelStem(dimensionTypes.getHolderOrThrow(profile.dimensionType), generator);
+        LevelStem stem = new LevelStem(dimensionTypes.getHolderOrThrow(profile.dimensionType()), generator);
         ResourceKey<LevelStem> stemKey = ResourceKey.create(Registry.LEVEL_STEM_REGISTRY, levelKey.location());
 
         WorldData worldData = server.getWorldData();
@@ -507,7 +807,7 @@ public final class PocketExpansionManager {
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE)) {
-            properties.store(output, "BiomePockets persistent runtime dimension");
+            properties.store(output, "BiomePockets expansion staging dimension");
         }
     }
 
@@ -516,6 +816,14 @@ public final class PocketExpansionManager {
                 .toAbsolutePath()
                 .normalize();
     }
+
+    private record ChunkSnapshot(
+            LevelChunkSection[] sections,
+            Map<BlockPos, CompoundTag> blockEntities,
+            Map<Heightmap.Types, long[]> heightmaps,
+            Map<ConfiguredStructureFeature<?, ?>, StructureStart> starts,
+            Map<ConfiguredStructureFeature<?, ?>, LongSet> references,
+            long inhabitedTime) { }
 
     private record GenerationProfile(
             ResourceKey<NoiseGeneratorSettings> noiseSettings,
