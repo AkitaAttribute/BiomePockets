@@ -38,7 +38,6 @@ import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
-import net.minecraft.world.level.storage.DerivedLevelData;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.WorldData;
@@ -591,7 +590,7 @@ public final class PocketDimensionManager {
         ChunkProgressListener progressListener = server.progressListenerFactory.create(11);
         Executor executor = server.executor;
         LevelStorageSource.LevelStorageAccess storageSource = server.storageSource;
-        DerivedLevelData derivedLevelData = new DerivedLevelData(worldData, worldData.overworldData());
+        PocketServerLevelData derivedLevelData = new PocketServerLevelData(worldData, worldData.overworldData());
 
         ServerLevel newLevel = new ServerLevel(
                 server,
