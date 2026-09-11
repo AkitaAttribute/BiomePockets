@@ -2,14 +2,12 @@ package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.event.world.SleepFinishedTimeEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -107,36 +105,6 @@ public final class PocketLifecycleEvents {
                 && !PocketClaimManager.isProtectedReturnDimension(from)) {
             PocketDimensionManager.handleDeparture(player.getServer(), from);
         }
-    }
-
-    @SubscribeEvent
-    public static void onSleepFinished(SleepFinishedTimeEvent event) {
-        if (!(event.getWorld() instanceof ServerLevel sleepingLevel)
-                || !PocketDimensionManager.isOwned(sleepingLevel.dimension())) {
-            return;
-        }
-
-        ServerLevel overworld = sleepingLevel.getServer().getLevel(Level.OVERWORLD);
-        if (overworld == null) {
-            return;
-        }
-
-        /*
-         * Dynamic non-overworld levels use DerivedLevelData. In 1.18.2 that data can
-         * read the shared day time, but its setDayTime implementation does not update
-         * the primary world clock. Vanilla/Forge therefore computes the correct wake
-         * time and wakes the sleepers, but the clock itself does not move.
-         *
-         * SleepFinishedTimeEvent is fired immediately before ServerLevel#setDayTime.
-         * Write the same requested wake time into the Overworld's primary level data;
-         * every pocket then observes that shared time through DerivedLevelData.
-         */
-        long wakeTime = event.getNewTime();
-        overworld.setDayTime(wakeTime);
-        BiomePockets.LOGGER.debug(
-                "Advanced shared day time to {} after sleeping in pocket {}",
-                wakeTime,
-                sleepingLevel.dimension().location());
     }
 
     @SubscribeEvent
