@@ -2,8 +2,10 @@ package com.akitaattribute.biomepockets.network;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.akitaattribute.biomepockets.world.PocketClaimManager;
+import net.minecraft.core.Registry;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.item.Item;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
 import net.minecraftforge.network.simple.SimpleChannel;
@@ -11,7 +13,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 import java.util.List;
 
 public final class NetworkHandler {
-    private static final String PROTOCOL = "2";
+    private static final String PROTOCOL = "3";
     private static int packetId = 0;
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
@@ -32,6 +34,10 @@ public final class NetworkHandler {
                 OpenPocketManagerPacket::encode, OpenPocketManagerPacket::decode, OpenPocketManagerPacket::handle);
         CHANNEL.registerMessage(packetId++, PocketManagerActionPacket.class,
                 PocketManagerActionPacket::encode, PocketManagerActionPacket::decode, PocketManagerActionPacket::handle);
+        CHANNEL.registerMessage(packetId++, PocketGenerationCooldownPacket.class,
+                PocketGenerationCooldownPacket::encode,
+                PocketGenerationCooldownPacket::decode,
+                PocketGenerationCooldownPacket::handle);
     }
 
     public static void openSelector(ServerPlayer player, List<ResourceLocation> biomes) {
@@ -46,5 +52,20 @@ public final class NetworkHandler {
 
     public static void sendPocketManagerAction(PocketClaimManager.Action action) {
         CHANNEL.sendToServer(new PocketManagerActionPacket(action));
+    }
+
+    public static void sendGenerationCooldown(
+            ServerPlayer player,
+            Item item,
+            int completed,
+            int total,
+            boolean active) {
+        ResourceLocation itemId = Registry.ITEM.getKey(item);
+        if (itemId == null) {
+            return;
+        }
+        CHANNEL.send(
+                PacketDistributor.PLAYER.with(() -> player),
+                new PocketGenerationCooldownPacket(itemId, completed, total, active));
     }
 }
