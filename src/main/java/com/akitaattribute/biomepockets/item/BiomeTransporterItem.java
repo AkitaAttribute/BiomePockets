@@ -1,6 +1,7 @@
 package com.akitaattribute.biomepockets.item;
 
 import com.akitaattribute.biomepockets.world.BiomeCatalog;
+import com.akitaattribute.biomepockets.world.PocketGenerationCooldownTracker;
 import com.akitaattribute.biomepockets.world.PocketThrottledInitialGenerator;
 import net.minecraft.network.chat.TextComponent;
 import net.minecraft.resources.ResourceLocation;
@@ -34,7 +35,8 @@ public class BiomeTransporterItem extends Item {
             }
 
             ResourceLocation selected = biomes.get(serverPlayer.getRandom().nextInt(biomes.size()));
-            PocketThrottledInitialGenerator.createAndTeleport(serverPlayer, selected, this);
+            PocketThrottledInitialGenerator.createAndTeleport(serverPlayer, selected);
+            PocketGenerationCooldownTracker.begin(serverPlayer, this);
         }
         return InteractionResultHolder.sidedSuccess(stack, level.isClientSide);
     }
