@@ -1,6 +1,7 @@
 package com.akitaattribute.biomepockets.network;
 
 import com.akitaattribute.biomepockets.world.PocketClaimManager;
+import com.akitaattribute.biomepockets.world.PocketFriendlyExpansionManager;
 import com.akitaattribute.biomepockets.world.PocketInitialSizeManager;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
@@ -21,7 +22,13 @@ public record PocketManagerActionPacket(PocketClaimManager.Action action) {
         NetworkEvent.Context context = contextSupplier.get();
         ServerPlayer sender = context.getSender();
         if (sender != null) {
-            context.enqueueWork(() -> PocketInitialSizeManager.handleManagerAction(sender, message.action));
+            context.enqueueWork(() -> {
+                if (message.action == PocketClaimManager.Action.EXPAND) {
+                    PocketFriendlyExpansionManager.startPlayerExpansion(sender);
+                } else {
+                    PocketInitialSizeManager.handleManagerAction(sender, message.action);
+                }
+            });
         }
         context.setPacketHandled(true);
     }
