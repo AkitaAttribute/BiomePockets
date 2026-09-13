@@ -116,7 +116,10 @@ public final class PocketDepartureCleanup {
 
         int listedPlayers = level.players().size();
         int actualPlayers = 0;
-        for (ServerPlayer player : level.players()) {
+        // The server-wide PlayerList is authoritative here. Using level.players() to
+        // determine liveness would make the stale old-level list validate itself and
+        // recreate the exact teardown race this retry queue is intended to absorb.
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (player.getLevel().dimension().equals(dimension)) {
                 actualPlayers++;
             }
@@ -131,7 +134,7 @@ public final class PocketDepartureCleanup {
 
         if (listedPlayers > 0) {
             // The exact race this scheduler exists to absorb: the old ServerLevel still
-            // lists a player whose actual level has already changed.
+            // lists a player whose authoritative current level has already changed.
             retryGhost(dimension, pending, "stale-player-list=" + listedPlayers);
             return;
         }
