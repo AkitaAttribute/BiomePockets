@@ -24,8 +24,9 @@ public final class ClientHooks {
     }
 
     public static void updatePocketManager(OpenPocketManagerPacket state) {
-        if (Minecraft.getInstance().screen instanceof PocketBiomeManagerScreen manager) {
-            manager.updateState(state);
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.screen instanceof PocketBiomeManagerScreen) {
+            minecraft.setScreen(new PocketBiomeManagerScreen(state));
         }
     }
 }
