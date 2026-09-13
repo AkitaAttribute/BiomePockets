@@ -22,6 +22,10 @@ public class BiomeTransporterItem extends Item {
     @Override
     public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
+        if (player.getCooldowns().isOnCooldown(this)) {
+            return InteractionResultHolder.fail(stack);
+        }
+
         if (!level.isClientSide && player instanceof ServerPlayer serverPlayer) {
             List<ResourceLocation> biomes = BiomeCatalog.getBiomeIds(serverPlayer.getServer());
             if (biomes.isEmpty()) {
@@ -30,7 +34,7 @@ public class BiomeTransporterItem extends Item {
             }
 
             ResourceLocation selected = biomes.get(serverPlayer.getRandom().nextInt(biomes.size()));
-            PocketThrottledInitialGenerator.createAndTeleport(serverPlayer, selected);
+            PocketThrottledInitialGenerator.createAndTeleport(serverPlayer, selected, this);
         }
         return InteractionResultHolder.sidedSuccess(stack, level.isClientSide);
     }
