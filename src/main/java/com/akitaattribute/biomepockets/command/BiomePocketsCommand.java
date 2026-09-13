@@ -50,9 +50,14 @@ public final class BiomePocketsCommand {
                 .then(Commands.literal("dimensions")
                         .executes(context -> listDimensions(context.getSource())))
                 .then(Commands.literal("cleanup")
-                        .requires(source -> source.hasPermission(2))
+                        // The bare command is report-only and safe to expose to every
+                        // player. Only the destructive age argument needs elevated
+                        // permission on multiplayer. Single-player keeps the debug
+                        // command usable even when cheats are not enabled.
                         .executes(context -> PocketCleanupAdmin.report(context.getSource()))
                         .then(Commands.argument("minimumAgeMinutes", IntegerArgumentType.integer(0))
+                                .requires(source -> source.hasPermission(2)
+                                        || source.getServer().isSingleplayer())
                                 .executes(context -> PocketCleanupAdmin.cleanup(
                                         context.getSource(),
                                         IntegerArgumentType.getInteger(context, "minimumAgeMinutes")))))
