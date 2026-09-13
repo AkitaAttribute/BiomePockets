@@ -2,9 +2,11 @@ package com.akitaattribute.biomepockets.world;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.akitaattribute.biomepockets.network.NetworkHandler;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.level.Level;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
@@ -22,6 +24,11 @@ import java.util.UUID;
  * Bridges the throttled generator's real completed/total work count into Minecraft's
  * item cooldown system. The server cooldown blocks reuse; a small progress packet keeps
  * the client's vanilla cooldown overlay pinned to actual generation progress.
+ *
+ * This tracker also remembers the dimension the player started generation from. When
+ * generation completes and the player has moved into the new pocket, it explicitly
+ * schedules cleanup of that source pocket. That gives transporter-to-transporter hops
+ * a second lifecycle signal in addition to Forge's PlayerChangedDimensionEvent.
  */
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketGenerationCooldownTracker {
@@ -50,7 +57,12 @@ public final class PocketGenerationCooldownTracker {
         }
 
         player.getCooldowns().addCooldown(sourceItem, SERVER_COOLDOWN_TICKS);
-        TrackedCooldown tracked = new TrackedCooldown(player.getServer(), sourceItem, -1, -1);
+        TrackedCooldown tracked = new TrackedCooldown(
+                player.getServer(),
+                sourceItem,
+                player.getLevel().dimension(),
+                -1,
+                -1);
         TRACKED.put(player.getUUID(), tracked);
         sync(player, tracked, progress);
     }
@@ -77,6 +89,16 @@ public final class PocketGenerationCooldownTracker {
             if (progress == null) {
                 clear(player, tracked.item());
                 TRACKED.remove(playerId);
+
+                ResourceKey<Level> sourceDimension = tracked.sourceDimension();
+                if (!player.getLevel().dimension().equals(sourceDimension)
+                        && PocketDimensionManager.isOwned(sourceDimension)) {
+                    PocketDepartureCleanup.requestCleanup(
+                            tracked.server(),
+                            sourceDimension,
+                            "generated-pocket-teleport",
+                            playerId);
+                }
                 continue;
             }
 
@@ -86,6 +108,7 @@ public final class PocketGenerationCooldownTracker {
                 TRACKED.put(playerId, new TrackedCooldown(
                         tracked.server(),
                         tracked.item(),
+                        tracked.sourceDimension(),
                         progress.completed(),
                         progress.total()));
             }
@@ -156,6 +179,7 @@ public final class PocketGenerationCooldownTracker {
     private record TrackedCooldown(
             MinecraftServer server,
             Item item,
+            ResourceKey<Level> sourceDimension,
             int lastCompleted,
             int lastTotal) { }
 

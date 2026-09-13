@@ -4,6 +4,7 @@ import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 
@@ -25,6 +26,7 @@ public final class PocketDiagnostics {
         UUID owner = claimOwner(dimension);
         boolean returnReserved = isReturnReserved(dimension);
         boolean activeStaging = PocketExpansionManager.isActiveStaging(dimension);
+        boolean initialGeneration = isInitialGeneration(dimension);
 
         StringBuilder result = new StringBuilder(" [BiomePockets-owned]");
         if (owner != null) {
@@ -35,6 +37,8 @@ public final class PocketDiagnostics {
                     .append(']');
         } else if (activeStaging) {
             result.append(" [type=expansion-staging]");
+        } else if (initialGeneration) {
+            result.append(" [type=initial-generation]");
         } else if (returnReserved) {
             result.append(" [type=return-reserved]");
         } else {
@@ -44,6 +48,19 @@ public final class PocketDiagnostics {
         result.append(" [biome=")
                 .append(biome == null ? "unknown" : biome)
                 .append(']');
+
+        String cleanupState = PocketDepartureCleanup.diagnostic(dimension);
+        if (!cleanupState.isEmpty()) {
+            result.append(cleanupState);
+        } else if (owner == null && !activeStaging && !initialGeneration && !returnReserved) {
+            ServerLevel level = server.getLevel(dimension);
+            if (level != null && level.players().isEmpty()) {
+                // This is the most useful failure signal for the lifecycle bug: an
+                // empty temporary pocket exists, but no departure cleanup request is
+                // pending and no retained cleanup trace explains why it was kept.
+                result.append(" [cleanup=untracked-empty]");
+            }
+        }
         return result.toString();
     }
 
@@ -51,6 +68,30 @@ public final class PocketDiagnostics {
         return PocketClaimManager.isProtectedReturnDimension(dimension)
                 || hasDisconnectReservation(dimension)
                 || hasPersistedReturnReservation(dimension);
+    }
+
+    /**
+     * Initial generation worlds are empty until the creating player is teleported into
+     * them. Treat them as active work rather than orphaned temporary dimensions.
+     */
+    @SuppressWarnings("unchecked")
+    public static boolean isInitialGeneration(ResourceKey<Level> dimension) {
+        try {
+            Field jobsField = PocketThrottledInitialGenerator.class.getDeclaredField("JOBS_BY_PLAYER");
+            jobsField.setAccessible(true);
+            Map<UUID, Object> jobs = (Map<UUID, Object>) jobsField.get(null);
+            for (Object job : jobs.values()) {
+                Field levelKeyField = job.getClass().getDeclaredField("levelKey");
+                levelKeyField.setAccessible(true);
+                Object value = levelKeyField.get(job);
+                if (dimension.equals(value)) {
+                    return true;
+                }
+            }
+        } catch (ReflectiveOperationException exception) {
+            BiomePockets.LOGGER.debug("Could not inspect active initial pocket generation", exception);
+        }
+        return false;
     }
 
     @SuppressWarnings("unchecked")

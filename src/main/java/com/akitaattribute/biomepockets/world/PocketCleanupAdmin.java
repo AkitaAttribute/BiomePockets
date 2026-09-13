@@ -51,8 +51,8 @@ public final class PocketCleanupAdmin {
 
     /**
      * Remove only unclaimed pockets that are empty, old enough, not reserved for any
-     * reconnect/Visit return, not an active expansion staging world, and still pass the
-     * normal marker-backed teardown path.
+     * reconnect/Visit return, not an active generation/staging world, and still pass
+     * the normal marker-backed teardown path.
      */
     public static int cleanup(CommandSourceStack source, int minimumAgeMinutes) {
         MinecraftServer server = source.getServer();
@@ -117,6 +117,7 @@ public final class PocketCleanupAdmin {
             MarkerAge markerAge = markerAge(server, dimension, now);
             boolean returnReserved = PocketDiagnostics.isReturnReserved(dimension);
             boolean activeStaging = PocketExpansionManager.isActiveStaging(dimension);
+            boolean initialGeneration = PocketDiagnostics.isInitialGeneration(dimension);
 
             result.add(new Candidate(
                     dimension,
@@ -125,6 +126,7 @@ public final class PocketCleanupAdmin {
                     markerAge.valid(),
                     returnReserved,
                     activeStaging,
+                    initialGeneration,
                     PocketDiagnostics.describe(server, dimension)));
         }
 
@@ -138,6 +140,9 @@ public final class PocketCleanupAdmin {
         }
         if (candidate.activeStaging()) {
             return "active expansion staging";
+        }
+        if (candidate.initialGeneration()) {
+            return "active initial generation";
         }
         if (candidate.returnReserved()) {
             return "return-reserved";
@@ -169,6 +174,7 @@ public final class PocketCleanupAdmin {
                 && candidate.ageMillis() >= minimumAgeMillis
                 && candidate.players() == 0
                 && !candidate.activeStaging()
+                && !candidate.initialGeneration()
                 && !candidate.returnReserved()
                 && candidate.validMarker()) {
             text.append(" [eligible=yes]");
@@ -232,6 +238,7 @@ public final class PocketCleanupAdmin {
             boolean validMarker,
             boolean returnReserved,
             boolean activeStaging,
+            boolean initialGeneration,
             String diagnostics) { }
 
     private record MarkerAge(long ageMillis, boolean valid) { }

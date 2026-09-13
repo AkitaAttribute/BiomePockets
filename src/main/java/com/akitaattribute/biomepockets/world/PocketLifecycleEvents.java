@@ -34,7 +34,7 @@ public final class PocketLifecycleEvents {
     @SubscribeEvent
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getPlayer() instanceof ServerPlayer player) {
-            handleActualDimensionDeparture(player, event.getFrom(), event.getTo());
+            handleActualDimensionDeparture(player, event.getFrom(), event.getTo(), "dimension-change");
         }
     }
 
@@ -81,14 +81,15 @@ public final class PocketLifecycleEvents {
                     player.getGameProfile().getName(),
                     from.location(),
                     to.location());
-            handleActualDimensionDeparture(player, from, to);
+            handleActualDimensionDeparture(player, from, to, "respawn");
         }
     }
 
     private static void handleActualDimensionDeparture(
             ServerPlayer player,
             ResourceKey<Level> from,
-            ResourceKey<Level> to) {
+            ResourceKey<Level> to,
+            String cause) {
         if (from.equals(to)) {
             return;
         }
@@ -98,7 +99,15 @@ public final class PocketLifecycleEvents {
 
         if (!PocketClaimManager.isClaimed(from)
                 && !PocketClaimManager.isProtectedReturnDimension(from)) {
-            PocketDimensionManager.handleDeparture(player.getServer(), from);
+            // Do not try teardown immediately inside the Forge dimension-change event.
+            // The old ServerLevel can still list the departing player at this point.
+            // The bounded cleanup queue checks after the event and retries only when
+            // the remaining player-list entry is stale.
+            PocketDepartureCleanup.requestCleanup(
+                    player.getServer(),
+                    from,
+                    cause,
+                    player.getUUID());
         }
     }
 
