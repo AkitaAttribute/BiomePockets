@@ -50,7 +50,7 @@ public final class PocketGenerationCooldownTracker {
         }
 
         player.getCooldowns().addCooldown(sourceItem, SERVER_COOLDOWN_TICKS);
-        TrackedCooldown tracked = new TrackedCooldown(sourceItem, -1, -1);
+        TrackedCooldown tracked = new TrackedCooldown(player.getServer(), sourceItem, -1, -1);
         TRACKED.put(player.getUUID(), tracked);
         sync(player, tracked, progress);
     }
@@ -61,14 +61,13 @@ public final class PocketGenerationCooldownTracker {
             return;
         }
 
-        MinecraftServer server = event.getServer();
         for (UUID playerId : new ArrayList<>(TRACKED.keySet())) {
             TrackedCooldown tracked = TRACKED.get(playerId);
             if (tracked == null) {
                 continue;
             }
 
-            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            ServerPlayer player = tracked.server().getPlayerList().getPlayer(playerId);
             if (player == null) {
                 TRACKED.remove(playerId);
                 continue;
@@ -85,6 +84,7 @@ public final class PocketGenerationCooldownTracker {
                     || progress.total() != tracked.lastTotal()) {
                 sync(player, tracked, progress);
                 TRACKED.put(playerId, new TrackedCooldown(
+                        tracked.server(),
                         tracked.item(),
                         progress.completed(),
                         progress.total()));
@@ -153,7 +153,11 @@ public final class PocketGenerationCooldownTracker {
         totalOperationsMethod = null;
     }
 
-    private record TrackedCooldown(Item item, int lastCompleted, int lastTotal) { }
+    private record TrackedCooldown(
+            MinecraftServer server,
+            Item item,
+            int lastCompleted,
+            int lastTotal) { }
 
     private record Progress(int completed, int total) { }
 }
