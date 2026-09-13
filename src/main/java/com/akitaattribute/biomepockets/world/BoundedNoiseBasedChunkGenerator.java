@@ -16,11 +16,13 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.BiomeSource;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.VineBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
@@ -32,6 +34,7 @@ import net.minecraft.world.level.levelgen.structure.StructureSet;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureManager;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -137,27 +140,35 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     }
 
     /**
-     * Fills each chunk surrounding the playable area from build bottom to build top.
-     * Doing this directly on ChunkAccess during worldgen is much cheaper than issuing
-     * live-world block updates, and neighboring barrier blocks already exist when edge
-     * trees/features evaluate placement.
+     * Barrier chunks are uniform by definition. The old implementation called
+     * ChunkAccess#setBlockState for every block from world bottom to world top, which
+     * meant roughly 1.5 million individual block writes for the 16 barrier chunks
+     * around even a 3x3 pocket. Replace whole section palettes instead. A single-value
+     * PalettedContainer represents all 4096 blocks in a section as BARRIER without
+     * touching them one by one.
      */
     private void fillBarrierChunk(ChunkAccess chunk) {
-        ChunkPos chunkPos = chunk.getPos();
-        int minX = chunkPos.getMinBlockX();
-        int maxX = chunkPos.getMaxBlockX();
-        int minZ = chunkPos.getMinBlockZ();
-        int maxZ = chunkPos.getMaxBlockZ();
-        int minY = chunk.getMinBuildHeight();
-        int maxY = chunk.getMaxBuildHeight();
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        LevelChunkSection[] sections = chunk.getSections();
+        BlockState barrier = Blocks.BARRIER.defaultBlockState();
 
-        for (int y = minY; y < maxY; y++) {
-            for (int z = minZ; z <= maxZ; z++) {
-                for (int x = minX; x <= maxX; x++) {
-                    chunk.setBlockState(pos.set(x, y, z), Blocks.BARRIER.defaultBlockState(), false);
-                }
-            }
+        for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+            LevelChunkSection oldSection = sections[sectionIndex];
+            PalettedContainer<BlockState> states = new PalettedContainer<>(
+                    Block.BLOCK_STATE_REGISTRY,
+                    barrier,
+                    PalettedContainer.Strategy.SECTION_STATES);
+            LevelChunkSection replacement = new LevelChunkSection(
+                    oldSection.bottomBlockY(),
+                    states,
+                    oldSection.getBiomes().copy());
+            replacement.recalcBlockCounts();
+            sections[sectionIndex] = replacement;
+        }
+
+        // Barrier chunks should never retain a block entity written by a feature or an
+        // earlier interrupted generation attempt.
+        for (BlockPos pos : new ArrayList<>(chunk.getBlockEntitiesPos())) {
+            chunk.removeBlockEntity(pos);
         }
         chunk.setUnsaved(true);
     }
@@ -165,9 +176,9 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
     /**
      * FEATURES has a one-chunk write radius, so any feature escaping the playable area
      * can only damage the surrounding barrier ring. Some features (notably lakes and
-     * End islands) write directly and can replace barrier blocks. Once all requested
-     * playable chunks have finished FEATURES/FULL, the manager calls this method on
-     * the ring chunks and the barrier becomes authoritative again.
+     * End islands) write directly and can replace barrier blocks. Repairing the ring is
+     * also section-based: count changed states from the palette, then replace the whole
+     * damaged section with one uniform barrier palette.
      */
     public int repairBarrierChunk(ChunkAccess chunk) {
         if (!isBarrierChunk(chunk)) {
@@ -175,9 +186,8 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
         }
 
         BlockState barrier = Blocks.BARRIER.defaultBlockState();
-        int repaired = 0;
         LevelChunkSection[] sections = chunk.getSections();
-        ChunkPos chunkPos = chunk.getPos();
+        int repaired = 0;
 
         for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
             LevelChunkSection section = sections[sectionIndex];
@@ -185,35 +195,30 @@ public final class BoundedNoiseBasedChunkGenerator extends NoiseBasedChunkGenera
                 continue;
             }
 
-            int sectionY = chunk.getSectionYFromSectionIndex(sectionIndex);
-            int baseY = sectionY << 4;
-            section.acquire();
-            try {
-                for (int localY = 0; localY < 16; localY++) {
-                    for (int localZ = 0; localZ < 16; localZ++) {
-                        for (int localX = 0; localX < 16; localX++) {
-                            BlockState oldState = section.getBlockState(localX, localY, localZ);
-                            if (oldState.is(Blocks.BARRIER)) {
-                                continue;
-                            }
-
-                            section.setBlockState(localX, localY, localZ, barrier, false);
-                            if (oldState.hasBlockEntity()) {
-                                chunk.removeBlockEntity(new BlockPos(
-                                        chunkPos.getMinBlockX() + localX,
-                                        baseY + localY,
-                                        chunkPos.getMinBlockZ() + localZ));
-                            }
-                            repaired++;
-                        }
-                    }
+            final int[] changedInSection = { 0 };
+            section.getStates().count((state, count) -> {
+                if (!state.is(Blocks.BARRIER)) {
+                    changedInSection[0] += count;
                 }
-            } finally {
-                section.release();
-            }
+            });
+            repaired += changedInSection[0];
+
+            PalettedContainer<BlockState> states = new PalettedContainer<>(
+                    Block.BLOCK_STATE_REGISTRY,
+                    barrier,
+                    PalettedContainer.Strategy.SECTION_STATES);
+            LevelChunkSection replacement = new LevelChunkSection(
+                    section.bottomBlockY(),
+                    states,
+                    section.getBiomes().copy());
+            replacement.recalcBlockCounts();
+            sections[sectionIndex] = replacement;
         }
 
         if (repaired > 0) {
+            for (BlockPos pos : new ArrayList<>(chunk.getBlockEntitiesPos())) {
+                chunk.removeBlockEntity(pos);
+            }
             chunk.setUnsaved(true);
         }
         return repaired;
