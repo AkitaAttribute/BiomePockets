@@ -16,13 +16,25 @@ import net.minecraft.resources.ResourceLocation;
 
 public final class PocketBiomeManagerScreen extends Screen {
     private static final int PANEL_WIDTH = 340;
-    private static final int PANEL_HEIGHT = 226;
+    private static final int PANEL_HEIGHT = 246;
     private static final int BUTTON_WIDTH = 270;
     private static final int BUTTON_HEIGHT = 22;
     private static final int BUTTON_GAP = 7;
-    private static final int HEADER_HEIGHT = 50;
+    private static final int HEADER_HEIGHT = 70;
+    private static final int PROGRESS_WIDTH = 270;
+    private static final int PROGRESS_HEIGHT = 9;
 
     private final OpenPocketManagerPacket state;
+
+    private Button claimButton;
+    private Button unclaimButton;
+    private ExpandButton expandButton;
+    private Button visitButton;
+    private Button exitButton;
+
+    private boolean expansionProgressActive;
+    private int expansionProgressCompleted;
+    private int expansionProgressTotal;
 
     public PocketBiomeManagerScreen(OpenPocketManagerPacket state) {
         super(new TranslatableComponent("screen.biomepockets.pocket_manager"));
@@ -42,27 +54,25 @@ public final class PocketBiomeManagerScreen extends Screen {
         int left = (width - BUTTON_WIDTH) / 2;
         int top = buttonTop();
 
-        Button claim = new Button(
+        claimButton = new Button(
                 left,
                 top,
                 BUTTON_WIDTH,
                 BUTTON_HEIGHT,
                 new TextComponent("Claim"),
                 button -> submit(PocketClaimManager.Action.CLAIM));
-        claim.active = state.canClaim();
-        addRenderableWidget(claim);
+        addRenderableWidget(claimButton);
 
-        Button unclaim = new Button(
+        unclaimButton = new Button(
                 left,
                 top + (BUTTON_HEIGHT + BUTTON_GAP),
                 BUTTON_WIDTH,
                 BUTTON_HEIGHT,
                 new TextComponent("Unclaim"),
                 button -> submit(PocketClaimManager.Action.UNCLAIM));
-        unclaim.active = state.canUnclaim();
-        addRenderableWidget(unclaim);
+        addRenderableWidget(unclaimButton);
 
-        ExpandButton expand = new ExpandButton(
+        expandButton = new ExpandButton(
                 left,
                 top + 2 * (BUTTON_HEIGHT + BUTTON_GAP),
                 BUTTON_WIDTH,
@@ -72,28 +82,53 @@ public final class PocketBiomeManagerScreen extends Screen {
                 state.expansionCost(),
                 state.creative() || state.availableXp() >= state.expansionCost(),
                 button -> submit(PocketClaimManager.Action.EXPAND));
-        expand.active = state.canExpand();
-        addRenderableWidget(expand);
+        addRenderableWidget(expandButton);
 
-        Button visit = new Button(
+        visitButton = new Button(
                 left,
                 top + 3 * (BUTTON_HEIGHT + BUTTON_GAP),
                 BUTTON_WIDTH,
                 BUTTON_HEIGHT,
                 new TextComponent("Visit"),
                 button -> submit(PocketClaimManager.Action.VISIT));
-        visit.active = state.canVisit();
-        addRenderableWidget(visit);
+        addRenderableWidget(visitButton);
 
-        Button exit = new Button(
+        exitButton = new Button(
                 left,
                 top + 4 * (BUTTON_HEIGHT + BUTTON_GAP),
                 BUTTON_WIDTH,
                 BUTTON_HEIGHT,
                 new TextComponent("Exit"),
                 button -> submit(PocketClaimManager.Action.EXIT));
-        exit.active = state.canExit();
-        addRenderableWidget(exit);
+        addRenderableWidget(exitButton);
+
+        applyButtonStates();
+    }
+
+    public void updateExpansionProgress(int completed, int total, boolean active) {
+        expansionProgressActive = active;
+        expansionProgressCompleted = Math.max(0, completed);
+        expansionProgressTotal = Math.max(0, total);
+        applyButtonStates();
+        if (expandButton != null) {
+            expandButton.setMessage(expansionLabel());
+        }
+    }
+
+    private boolean expansionBusy() {
+        return state.expanding() || expansionProgressActive;
+    }
+
+    private void applyButtonStates() {
+        if (claimButton == null) {
+            return;
+        }
+        boolean busy = expansionBusy();
+        claimButton.active = state.canClaim() && !busy;
+        unclaimButton.active = state.canUnclaim() && !busy;
+        expandButton.active = state.canExpand() && !busy;
+        visitButton.active = state.canVisit() && !busy;
+        exitButton.active = state.canExit() && !busy;
     }
 
     private int expansionLevelEquivalent() {
@@ -101,10 +136,6 @@ public final class PocketBiomeManagerScreen extends Screen {
             return 0;
         }
 
-        // The server charges raw XP points. Display the highest vanilla experience
-        // level whose cumulative XP requirement is <= that raw cost. For example:
-        // 1395 XP = level 30 exactly, while 2790 XP = level 39 plus partial progress
-        // toward level 40, so the displayed equivalent is 39 rather than 60.
         int rawXp = state.expansionCost();
         int level = 0;
         while (totalXpForLevel(level + 1) <= rawXp && level < 21863) {
@@ -124,7 +155,7 @@ public final class PocketBiomeManagerScreen extends Screen {
     }
 
     private Component expansionLabel() {
-        if (state.expanding()) {
+        if (expansionBusy()) {
             return new TextComponent("Expand - currently generating");
         }
         if (!state.hasClaim()) {
@@ -135,6 +166,20 @@ public final class PocketBiomeManagerScreen extends Screen {
     }
 
     private void submit(PocketClaimManager.Action action) {
+        if (action == PocketClaimManager.Action.EXPAND) {
+            // Expansion keeps this screen open. The server immediately replaces this
+            // provisional zero-progress state with its actual completed/total work.
+            expansionProgressActive = true;
+            expansionProgressCompleted = 0;
+            expansionProgressTotal = 1;
+            applyButtonStates();
+            if (expandButton != null) {
+                expandButton.setMessage(expansionLabel());
+            }
+            NetworkHandler.sendPocketManagerAction(action);
+            return;
+        }
+
         NetworkHandler.sendPocketManagerAction(action);
         onClose();
     }
@@ -159,7 +204,7 @@ public final class PocketBiomeManagerScreen extends Screen {
 
         String status;
         int statusColor;
-        if (state.expanding()) {
+        if (expansionBusy()) {
             status = "Generating expanded pocket...";
             statusColor = 0xFFFFAA00;
         } else if (state.hasClaim()) {
@@ -171,7 +216,37 @@ public final class PocketBiomeManagerScreen extends Screen {
         }
         drawCenteredString(poseStack, font, status, width / 2, panelTop + 29, statusColor);
 
+        if (expansionBusy()) {
+            renderExpansionProgress(poseStack, panelTop);
+        }
+
         super.render(poseStack, mouseX, mouseY, partialTick);
+    }
+
+    private void renderExpansionProgress(PoseStack poseStack, int panelTop) {
+        int left = (width - PROGRESS_WIDTH) / 2;
+        int top = panelTop + 44;
+        int right = left + PROGRESS_WIDTH;
+        int bottom = top + PROGRESS_HEIGHT;
+
+        fill(poseStack, left - 1, top - 1, right + 1, bottom + 1, 0xFFAAAAAA);
+        fill(poseStack, left, top, right, bottom, 0xFF303030);
+
+        int total = Math.max(1, expansionProgressTotal);
+        int completed = Math.min(Math.max(0, expansionProgressCompleted), total);
+        int fillWidth = (int) Math.round((double) PROGRESS_WIDTH * completed / total);
+        if (fillWidth > 0) {
+            fill(poseStack, left, top, left + fillWidth, bottom, 0xFF55AA55);
+        }
+
+        String progressText;
+        if (expansionProgressTotal > 0) {
+            int percent = (int) Math.floor(100.0D * completed / total);
+            progressText = percent + "%";
+        } else {
+            progressText = "Starting...";
+        }
+        drawCenteredString(poseStack, font, progressText, width / 2, top + 11, 0xFFCCCCCC);
     }
 
     private static final class ExpandButton extends Button {
@@ -206,9 +281,6 @@ public final class PocketBiomeManagerScreen extends Screen {
                 return;
             }
 
-            // Waystones uses one of the vanilla enchanting-table 1/2/3 requirement
-            // sprites. Those sprites contain their numeral, so draw only the orb part
-            // of the first sprite and render our calculated level equivalent ourselves.
             RenderSystem.setShaderColor(1F, 1F, 1F, 1F);
             RenderSystem.setShaderTexture(0, ENCHANTMENT_TABLE_GUI);
 
