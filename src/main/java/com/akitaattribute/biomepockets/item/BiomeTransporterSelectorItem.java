@@ -18,6 +18,10 @@ public class BiomeTransporterSelectorItem extends Item {
     @Override
     public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
+        if (player.getCooldowns().isOnCooldown(this)) {
+            return InteractionResultHolder.fail(stack);
+        }
+
         if (!level.isClientSide && player instanceof ServerPlayer serverPlayer) {
             NetworkHandler.openSelector(serverPlayer, BiomeCatalog.getBiomeIds(serverPlayer.getServer()));
         }
