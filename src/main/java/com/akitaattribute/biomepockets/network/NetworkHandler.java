@@ -66,6 +66,9 @@ public final class NetworkHandler {
                 PacketDistributor.PLAYER.with(() -> player),
                 new PocketManagerStateUpdatePacket(
                         OpenPocketManagerPacket.from(PocketClaimManager.stateFor(player))));
+        // If this refresh represents an active expansion, immediately resend the real
+        // work counters so replacing the screen cannot discard the latest progress.
+        PocketFriendlyExpansionManager.syncProgress(player);
     }
 
     public static void sendPocketManagerAction(PocketClaimManager.Action action) {
