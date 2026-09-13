@@ -16,4 +16,16 @@ public final class ClientHooks {
     public static void openPocketManager(OpenPocketManagerPacket state) {
         Minecraft.getInstance().setScreen(new PocketBiomeManagerScreen(state));
     }
+
+    public static void updatePocketExpansionProgress(int completed, int total, boolean active) {
+        if (Minecraft.getInstance().screen instanceof PocketBiomeManagerScreen manager) {
+            manager.updateExpansionProgress(completed, total, active);
+        }
+    }
+
+    public static void updatePocketManager(OpenPocketManagerPacket state) {
+        if (Minecraft.getInstance().screen instanceof PocketBiomeManagerScreen manager) {
+            manager.updateState(state);
+        }
+    }
 }
