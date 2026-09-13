@@ -3,10 +3,12 @@ package com.akitaattribute.biomepockets.client;
 import com.akitaattribute.biomepockets.BiomePockets;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.Registry;
+import net.minecraft.network.chat.ChatType;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemCooldowns;
 import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -61,6 +63,27 @@ public final class ClientGenerationCooldowns {
 
         for (Map.Entry<Item, Progress> entry : ACTIVE.entrySet()) {
             pinCooldown(entry.getKey(), entry.getValue());
+        }
+    }
+
+    /**
+     * Build 105 emitted action-bar loading text from the throttled generator. Keep
+     * server-side error messages intact, but suppress only those known loading strings
+     * now that generation progress is represented by the item's cooldown overlay.
+     */
+    @SubscribeEvent
+    public static void onChatReceived(ClientChatReceivedEvent event) {
+        if (event.getType() != ChatType.GAME_INFO) {
+            return;
+        }
+
+        String text = event.getMessage().getString();
+        boolean progressMessage = text.startsWith("Preparing biome pocket: ");
+        boolean initialMessage = text.startsWith("Preparing ")
+                && text.contains(" biome pocket (")
+                && (text.endsWith("...") || text.contains("server-friendly speed"));
+        if (progressMessage || initialMessage) {
+            event.setCanceled(true);
         }
     }
 
