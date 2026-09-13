@@ -1,7 +1,7 @@
 package com.akitaattribute.biomepockets.network;
 
 import com.akitaattribute.biomepockets.world.BiomeCatalog;
-import com.akitaattribute.biomepockets.world.PocketInitialSizeManager;
+import com.akitaattribute.biomepockets.world.PocketThrottledInitialGenerator;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
@@ -26,7 +26,7 @@ public record SelectBiomePacket(ResourceLocation biome) {
                 return;
             }
             if (BiomeCatalog.getBiome(sender.getServer(), message.biome).isPresent()) {
-                PocketInitialSizeManager.createAndTeleport(sender, message.biome);
+                PocketThrottledInitialGenerator.createAndTeleport(sender, message.biome);
             }
         });
         context.setPacketHandled(true);
