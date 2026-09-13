@@ -2,6 +2,7 @@ package com.akitaattribute.biomepockets.network;
 
 import com.akitaattribute.biomepockets.registry.ModItems;
 import com.akitaattribute.biomepockets.world.BiomeCatalog;
+import com.akitaattribute.biomepockets.world.PocketGenerationCooldownTracker;
 import com.akitaattribute.biomepockets.world.PocketThrottledInitialGenerator;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
@@ -27,9 +28,9 @@ public record SelectBiomePacket(ResourceLocation biome) {
                 return;
             }
             if (BiomeCatalog.getBiome(sender.getServer(), message.biome).isPresent()) {
-                PocketThrottledInitialGenerator.createAndTeleport(
+                PocketThrottledInitialGenerator.createAndTeleport(sender, message.biome);
+                PocketGenerationCooldownTracker.begin(
                         sender,
-                        message.biome,
                         ModItems.BIOME_TRANSPORTER_SELECTOR.get());
             }
         });
