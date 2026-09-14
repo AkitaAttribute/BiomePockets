@@ -33,29 +33,23 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Selects random pocket seeds whose native climate/terrain would naturally resolve to
- * the requested biome before BiomePockets locks the finished pocket to that biome.
+ * Selects random pocket seeds whose native climate and terrain are appropriate for the
+ * requested biome before BiomePockets locks the resulting pocket to that biome.
  *
- * Rejected random seeds are not automatically wasted. If a rejected seed forms a
- * coherent region for some other naturally selected biome, it is placed into a FIFO
- * bucket for that biome/profile/starting-radius. A future request for that exact bucket
- * consumes the oldest seed and removes it permanently from the queue.
+ * Failed candidates are classified by the biome they naturally favor and are persisted
+ * in FIFO buckets. A cached seed is removed from the head when considered and is always
+ * revalidated before it can be used. Seeds classified with an older validation format
+ * are intentionally ignored by using a versioned cache filename.
  */
 public final class PocketSeedBroker {
-    private static final String CACHE_FILE = "biomepockets-seed-cache-v1.tsv";
+    private static final String CACHE_FILE = "biomepockets-seed-cache-v2.tsv";
     private static final int MAX_RANDOM_ATTEMPTS = 96;
-    private static final int REQUIRED_MATCHES = 5;
-    private static final int SAMPLE_COUNT = 9;
 
     private static final Map<BucketKey, Deque<Long>> BUCKETS = new LinkedHashMap<>();
     private static Path loadedCachePath;
 
     private PocketSeedBroker() { }
 
-    /**
-     * Return a unique seed suitable for this biome and pocket radius when possible.
-     * Cached seeds are consumed FIFO. Newly tested seeds remain random.
-     */
     public static synchronized long selectSeed(
             MinecraftServer server,
             Holder<Biome> targetBiome,
@@ -78,9 +72,6 @@ public final class PocketSeedBroker {
         ensureLoaded(server);
         BucketKey targetBucket = new BucketKey(profile, radius, targetId);
 
-        // FIFO means we always inspect and remove the head first. A stale cached seed
-        // (for example after a modpack worldgen change) is reclassified rather than
-        // silently trusted forever.
         Deque<Long> cached = BUCKETS.get(targetBucket);
         if (cached != null) {
             while (!cached.isEmpty()) {
@@ -90,17 +81,18 @@ public final class PocketSeedBroker {
                     pruneEmptyBucket(targetBucket);
                     save(server);
                     BiomePockets.LOGGER.info(
-                            "Pocket seed broker consumed FIFO cached seed {} for {} {}x{} ({} cached seed(s) remain)",
+                            "Pocket seed broker consumed FIFO cached seed {} for {} {}x{}; biome={}/{}, terrain={}/{}",
                             seed,
                             targetId,
                             radius * 2 + 1,
                             radius * 2 + 1,
-                            BUCKETS.getOrDefault(targetBucket, new ArrayDeque<>()).size());
+                            candidate.targetMatches(),
+                            candidate.sampleCount(),
+                            candidate.targetTerrainMatches(),
+                            candidate.sampleCount());
                     return seed;
                 }
 
-                // Worldgen changed since this seed was cached. Preserve it only if it
-                // still cleanly belongs to some other biome bucket.
                 if (candidate.qualifiedForDominant()
                         && candidate.dominantBiome() != null
                         && !candidate.dominantBiome().equals(targetId)) {
@@ -111,7 +103,8 @@ public final class PocketSeedBroker {
         }
 
         List<Candidate> rejected = new ArrayList<>();
-        Candidate best = null;
+        Candidate bestTerrainCompatible = null;
+
         for (int attempt = 1; attempt <= MAX_RANDOM_ATTEMPTS; attempt++) {
             long seed = randomSeed();
             Candidate candidate = classify(server, referenceLevel, profile, targetId, radius, seed);
@@ -119,47 +112,76 @@ public final class PocketSeedBroker {
                 enqueueRejected(profile, radius, rejected, seed);
                 save(server);
                 BiomePockets.LOGGER.info(
-                        "Pocket seed broker matched {} {}x{} after {} random candidate(s): seed={} ({}/{})",
+                        "Pocket seed broker matched {} {}x{} after {} candidate(s): seed={}, biome={}/{}, terrain={}/{}",
                         targetId,
                         radius * 2 + 1,
                         radius * 2 + 1,
                         attempt,
                         seed,
                         candidate.targetMatches(),
-                        SAMPLE_COUNT);
+                        candidate.sampleCount(),
+                        candidate.targetTerrainMatches(),
+                        candidate.sampleCount());
                 return seed;
             }
 
             rejected.add(candidate);
-            if (best == null || candidate.targetScore() > best.targetScore()) {
-                best = candidate;
+            if (candidate.targetTerrainCompatible()
+                    && (bestTerrainCompatible == null
+                    || candidate.targetScore() > bestTerrainCompatible.targetScore())) {
+                bestTerrainCompatible = candidate;
             }
         }
 
-        // If an exact coherent match was not found, use the candidate that came closest
-        // instead of throwing away all of the information and selecting a fresh unknown
-        // seed. Do not place that used seed into another bucket.
-        long selected = best == null ? randomSeed() : best.seed();
-        enqueueRejected(profile, radius, rejected, selected);
-        save(server);
-
-        if (best == null || best.targetMatches() == 0) {
+        /*
+         * Never deliberately fall back to an ocean basin for a land biome (or dry land
+         * for an aquatic biome). If climate matching is unusually difficult, use the
+         * best candidate that still satisfies the requested terrain character. This is
+         * intentionally stricter than the v1 broker, whose "best" fallback could be a
+         * 9/9 plains biome label sitting entirely below sea level.
+         */
+        if (bestTerrainCompatible != null) {
+            long selected = bestTerrainCompatible.seed();
+            enqueueRejected(profile, radius, rejected, selected);
+            save(server);
             BiomePockets.LOGGER.warn(
-                    "Pocket seed broker could not naturally resolve {} in {} candidates; using random/best-effort seed {}",
-                    targetId,
-                    MAX_RANDOM_ATTEMPTS,
-                    selected);
-        } else {
-            BiomePockets.LOGGER.warn(
-                    "Pocket seed broker did not find a full {} match in {} candidates; using best seed {} ({}/{} samples, center={})",
+                    "Pocket seed broker did not find a full {} climate match in {} candidates; using terrain-safe seed {} (biome={}/{}, terrain={}/{})",
                     targetId,
                     MAX_RANDOM_ATTEMPTS,
                     selected,
-                    best.targetMatches(),
-                    SAMPLE_COUNT,
-                    best.centerBiome());
+                    bestTerrainCompatible.targetMatches(),
+                    bestTerrainCompatible.sampleCount(),
+                    bestTerrainCompatible.targetTerrainMatches(),
+                    bestTerrainCompatible.sampleCount());
+            return selected;
         }
-        return selected;
+
+        /*
+         * Reaching this point means terrain sampling itself could not find one suitable
+         * candidate, which should be exceptionally rare. Continue searching for a seed
+         * that at least satisfies terrain instead of knowingly returning a bad one.
+         */
+        for (int attempt = 1; attempt <= MAX_RANDOM_ATTEMPTS; attempt++) {
+            long seed = randomSeed();
+            Candidate candidate = classify(server, referenceLevel, profile, targetId, radius, seed);
+            if (candidate.targetTerrainCompatible()) {
+                enqueueRejected(profile, radius, rejected, seed);
+                save(server);
+                BiomePockets.LOGGER.warn(
+                        "Pocket seed broker required terrain-only fallback for {} after {} additional candidates: seed={}",
+                        targetId,
+                        attempt,
+                        seed);
+                return seed;
+            }
+            rejected.add(candidate);
+        }
+
+        BiomePockets.LOGGER.error(
+                "Pocket seed broker could not find terrain compatible with {} after {} candidates; using final random seed",
+                targetId,
+                MAX_RANDOM_ATTEMPTS * 2);
+        return randomSeed();
     }
 
     private static Candidate classify(
@@ -170,45 +192,63 @@ public final class PocketSeedBroker {
             int radius,
             long seed) {
         try {
-            ChunkGenerator candidateGenerator = referenceLevel.getChunkSource().getGenerator().withSeed(seed);
+            ChunkGenerator generator = referenceLevel.getChunkSource().getGenerator().withSeed(seed);
+            int[] offsets = sampleOffsets(radius);
+            int sampleCount = offsets.length * offsets.length;
+            int required = sampleCount / 2 + 1;
+            boolean targetWantsWater = profile == Profile.OVERWORLD && isWaterBiome(targetId);
+
             Map<ResourceLocation, Integer> counts = new LinkedHashMap<>();
             ResourceLocation centerBiome = null;
+            boolean centerTerrainMatches = profile != Profile.OVERWORLD;
             int targetMatches = 0;
+            int targetTerrainMatches = 0;
 
-            int[] chunkOffsets = new int[] { -radius, 0, radius };
-            for (int chunkX : chunkOffsets) {
-                for (int chunkZ : chunkOffsets) {
+            int seaLevel = generator.getSeaLevel();
+            for (int chunkX : offsets) {
+                for (int chunkZ : offsets) {
                     int blockX = chunkX * 16 + 8;
                     int blockZ = chunkZ * 16 + 8;
-                    int surfaceY;
-                    try {
-                        surfaceY = candidateGenerator.getBaseHeight(
-                                blockX,
-                                blockZ,
-                                Heightmap.Types.WORLD_SURFACE_WG,
-                                referenceLevel);
-                    } catch (RuntimeException ignored) {
-                        surfaceY = candidateGenerator.getSeaLevel();
-                    }
-                    surfaceY = Math.max(
-                            referenceLevel.getMinBuildHeight() + 1,
-                            Math.min(referenceLevel.getMaxBuildHeight() - 1, surfaceY));
+                    int worldSurfaceY = generator.getBaseHeight(
+                            blockX,
+                            blockZ,
+                            Heightmap.Types.WORLD_SURFACE_WG,
+                            referenceLevel);
+                    int oceanFloorY = generator.getBaseHeight(
+                            blockX,
+                            blockZ,
+                            Heightmap.Types.OCEAN_FLOOR_WG,
+                            referenceLevel);
 
-                    Holder<Biome> natural = candidateGenerator.getNoiseBiome(
+                    int biomeY = Math.max(
+                            referenceLevel.getMinBuildHeight() + 1,
+                            Math.min(referenceLevel.getMaxBuildHeight() - 1, worldSurfaceY));
+                    Holder<Biome> natural = generator.getNoiseBiome(
                             QuartPos.fromBlock(blockX),
-                            QuartPos.fromBlock(surfaceY),
+                            QuartPos.fromBlock(biomeY),
                             QuartPos.fromBlock(blockZ));
                     ResourceLocation naturalId = biomeId(server, natural);
-                    if (naturalId == null) {
-                        continue;
+                    if (naturalId != null) {
+                        counts.merge(naturalId, 1, Integer::sum);
+                        if (naturalId.equals(targetId)) {
+                            targetMatches++;
+                        }
+                    }
+
+                    boolean terrainMatches;
+                    if (profile != Profile.OVERWORLD) {
+                        terrainMatches = true;
+                    } else {
+                        boolean submerged = oceanFloorY < seaLevel;
+                        terrainMatches = targetWantsWater ? submerged : !submerged;
+                    }
+                    if (terrainMatches) {
+                        targetTerrainMatches++;
                     }
 
                     if (chunkX == 0 && chunkZ == 0) {
                         centerBiome = naturalId;
-                    }
-                    counts.merge(naturalId, 1, Integer::sum);
-                    if (naturalId.equals(targetId)) {
-                        targetMatches++;
+                        centerTerrainMatches = terrainMatches;
                     }
                 }
             }
@@ -223,29 +263,97 @@ public final class PocketSeedBroker {
             }
 
             boolean centerMatches = targetId.equals(centerBiome);
-            boolean matchesTarget = centerMatches && targetMatches >= REQUIRED_MATCHES;
+            boolean targetTerrainCompatible = centerTerrainMatches && targetTerrainMatches >= required;
+            boolean matchesTarget = centerMatches
+                    && targetMatches >= required
+                    && targetTerrainCompatible;
+
+            boolean dominantTerrainCompatible = true;
+            if (profile == Profile.OVERWORLD && dominant != null) {
+                boolean dominantWantsWater = isWaterBiome(dominant);
+                int dominantTerrainMatches = 0;
+                boolean dominantCenterTerrainMatches = false;
+
+                for (int chunkX : offsets) {
+                    for (int chunkZ : offsets) {
+                        int blockX = chunkX * 16 + 8;
+                        int blockZ = chunkZ * 16 + 8;
+                        int oceanFloorY = generator.getBaseHeight(
+                                blockX,
+                                blockZ,
+                                Heightmap.Types.OCEAN_FLOOR_WG,
+                                referenceLevel);
+                        boolean submerged = oceanFloorY < seaLevel;
+                        boolean matches = dominantWantsWater ? submerged : !submerged;
+                        if (matches) {
+                            dominantTerrainMatches++;
+                        }
+                        if (chunkX == 0 && chunkZ == 0) {
+                            dominantCenterTerrainMatches = matches;
+                        }
+                    }
+                }
+                dominantTerrainCompatible = dominantCenterTerrainMatches
+                        && dominantTerrainMatches >= required;
+            }
+
             boolean qualifiedForDominant = dominant != null
                     && dominant.equals(centerBiome)
-                    && dominantCount >= REQUIRED_MATCHES;
-            int targetScore = targetMatches * 10 + (centerMatches ? 20 : 0);
+                    && dominantCount >= required
+                    && dominantTerrainCompatible;
+            int targetScore = targetMatches * 100
+                    + targetTerrainMatches * 10
+                    + (centerMatches ? 500 : 0)
+                    + (centerTerrainMatches ? 250 : 0);
+
             return new Candidate(
                     seed,
-                    profile,
                     centerBiome,
                     dominant,
                     targetMatches,
                     dominantCount,
+                    targetTerrainMatches,
+                    sampleCount,
                     matchesTarget,
+                    targetTerrainCompatible,
                     qualifiedForDominant,
                     targetScore);
         } catch (RuntimeException exception) {
             BiomePockets.LOGGER.debug(
-                    "Could not climate-classify candidate pocket seed {} for {}",
+                    "Could not climate/terrain-classify candidate pocket seed {} for {}",
                     seed,
                     targetId,
                     exception);
-            return new Candidate(seed, profile, null, null, 0, 0, false, false, 0);
+            return new Candidate(seed, null, null, 0, 0, 0, 1, false, false, false, 0);
         }
+    }
+
+    /**
+     * Up to five sample rows/columns across the actual starting footprint. This gives a
+     * 9x9 pocket 25 probes instead of assuming three probes can represent 81 chunks,
+     * while keeping seed testing much cheaper than generating even one real chunk.
+     */
+    private static int[] sampleOffsets(int radius) {
+        if (radius <= 1) {
+            return new int[] { -1, 0, 1 };
+        }
+        if (radius == 2) {
+            return new int[] { -2, -1, 0, 1, 2 };
+        }
+        int middle = Math.max(1, radius / 2);
+        return new int[] { -radius, -middle, 0, middle, radius };
+    }
+
+    private static boolean isWaterBiome(ResourceLocation biomeId) {
+        ResourceKey<Biome> key = ResourceKey.create(Registry.BIOME_REGISTRY, biomeId);
+        if (BiomeDictionary.hasType(key, BiomeDictionary.Type.WATER)
+                || BiomeDictionary.hasType(key, BiomeDictionary.Type.OCEAN)
+                || BiomeDictionary.hasType(key, BiomeDictionary.Type.RIVER)) {
+            return true;
+        }
+
+        String path = biomeId.getPath();
+        return path.contains("ocean") || path.contains("river");
     }
 
     private static void enqueueRejected(
@@ -359,7 +467,7 @@ public final class PocketSeedBroker {
         Path path = cachePath(server);
         Path temp = path.resolveSibling(path.getFileName() + ".tmp");
         List<String> lines = new ArrayList<>();
-        lines.add("# BiomePockets FIFO seed cache v1: profile<TAB>radius<TAB>biome<TAB>seed");
+        lines.add("# BiomePockets FIFO seed cache v2: profile<TAB>radius<TAB>biome<TAB>seed");
         for (Map.Entry<BucketKey, Deque<Long>> entry : BUCKETS.entrySet()) {
             BucketKey key = entry.getKey();
             for (Long seed : entry.getValue()) {
@@ -413,12 +521,14 @@ public final class PocketSeedBroker {
 
     private record Candidate(
             long seed,
-            Profile profile,
             ResourceLocation centerBiome,
             ResourceLocation dominantBiome,
             int targetMatches,
             int dominantMatches,
+            int targetTerrainMatches,
+            int sampleCount,
             boolean matchesTarget,
+            boolean targetTerrainCompatible,
             boolean qualifiedForDominant,
             int targetScore) { }
 }
