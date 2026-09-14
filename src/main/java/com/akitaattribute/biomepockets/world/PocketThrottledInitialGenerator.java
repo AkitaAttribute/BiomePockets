@@ -104,8 +104,7 @@ public final class PocketThrottledInitialGenerator {
 
         int radius = rollInitialRadius(player);
         int size = radius * 2 + 1;
-        long seed = server.getWorldData().worldGenSettings().seed()
-                ^ UUID.randomUUID().getMostSignificantBits();
+        long seed = PocketSeedBroker.selectSeed(server, biome.get(), radius);
 
         ResourceLocation dimensionId = new ResourceLocation(
                 BiomePockets.MOD_ID,
