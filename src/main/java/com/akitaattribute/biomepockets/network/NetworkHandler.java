@@ -15,7 +15,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 import java.util.List;
 
 public final class NetworkHandler {
-    private static final String PROTOCOL = "5";
+    private static final String PROTOCOL = "6";
     private static int packetId = 0;
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
@@ -77,8 +77,6 @@ public final class NetworkHandler {
                 PacketDistributor.PLAYER.with(() -> player),
                 new PocketManagerStateUpdatePacket(
                         OpenPocketManagerPacket.from(PocketClaimManager.stateFor(player))));
-        // If this refresh represents an active expansion, immediately resend the real
-        // work counters so replacing the screen cannot discard the latest progress.
         PocketFriendlyExpansionManager.syncProgress(player);
     }
 

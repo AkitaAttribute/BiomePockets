@@ -47,11 +47,15 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Creates new pockets without flooding Minecraft's world-generation pipeline.
  *
- * By default this remains the original friendly scheduler: one ChunkStatus request in
- * flight globally, followed by one quiet server tick. The selector Debug tab can raise
- * the per-tick/in-flight budget for performance testing. Requests are still stage-safe:
- * several chunks may run concurrently at the same generation status, but a job cannot
- * advance to its next status until every request from the current status has completed.
+ * Generation progress is measured in the same X/Y work units used by the old action-bar
+ * progress text: one unit is one requested ChunkStatus for one pocket chunk (or one
+ * barrier generation/repair request). The Debug tab now sets the burst size as a
+ * percentage of that pocket's total work, so the amount automatically scales with 3x3,
+ * 5x5, 7x7, and 9x9 pockets.
+ *
+ * Requests remain stage-safe. Several chunks may run concurrently at the same status,
+ * but a job cannot advance to its next status until every request from the current stage
+ * has completed.
  */
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketThrottledInitialGenerator {
@@ -129,13 +133,14 @@ public final class PocketThrottledInitialGenerator {
             JOBS_BY_PLAYER.put(player.getUUID(), job);
 
             BiomePockets.LOGGER.info(
-                    "Queued server-friendly {} pocket {} at {}x{} ({} generation operations, debug budget={}/tick)",
+                    "Queued server-friendly {} pocket {} at {}x{} ({} generation work units, debug batch={}%=~{} units)",
                     biomeId,
                     levelKey.location(),
                     size,
                     size,
                     job.totalOperations(),
-                    PocketDebugSettings.generationOpsPerTick());
+                    PocketDebugSettings.generationBatchPercent(),
+                    job.generationBatchSize());
             player.displayClientMessage(
                     new TextComponent("Preparing " + biomeId + " biome pocket (" + size + "x" + size
                             + ") at server-friendly speed..."),
@@ -172,13 +177,13 @@ public final class PocketThrottledInitialGenerator {
             return;
         }
 
-        int limit = PocketDebugSettings.generationOpsPerTick();
+        int limit = currentGlobalBurstLimit();
         if (requestsInFlight >= limit) {
             return;
         }
 
-        // Preserve the old friendly cadence when the burst has fully drained. At the
-        // default limit of one this is exactly one quiet tick after every operation.
+        // A drained burst still gets one quiet server tick. The percentage controls the
+        // size of each burst; it does not remove the yield point between drained bursts.
         if (requestsInFlight == 0 && quietTicksRemaining > 0) {
             quietTicksRemaining--;
             return;
@@ -207,8 +212,8 @@ public final class PocketThrottledInitialGenerator {
             GenerationRequest request = job.reserveNextRequest();
             JOBS.addLast(job);
             if (request == null) {
-                // This job has submitted its whole current stage and is waiting for
-                // outstanding requests to finish. Give another queued player a chance.
+                // Current stage is fully submitted and waiting for its outstanding
+                // requests. Try another player's queued job instead.
                 stalledJobs++;
                 continue;
             }
@@ -217,6 +222,16 @@ public final class PocketThrottledInitialGenerator {
             budget--;
             stalledJobs = 0;
         }
+    }
+
+    private static int currentGlobalBurstLimit() {
+        int limit = 1;
+        for (GenerationJob job : JOBS) {
+            if (!job.cancelled) {
+                limit = Math.max(limit, job.generationBatchSize());
+            }
+        }
+        return limit;
     }
 
     @SubscribeEvent
@@ -549,9 +564,9 @@ public final class PocketThrottledInitialGenerator {
         }
 
         /**
-         * Reserves one operation from the current generation stage. Reservation advances
-         * only the chunk cursor; the next status/phase is locked until every reserved
-         * operation from this stage has completed.
+         * Reserve one operation from the current generation stage. Reservation advances
+         * only the chunk cursor; the next status/phase remains locked until every
+         * reserved operation from this stage has completed.
          */
         private GenerationRequest reserveNextRequest() {
             advanceStageIfDrained();
@@ -663,6 +678,10 @@ public final class PocketThrottledInitialGenerator {
         private int totalOperations() {
             return playable.size() * (PRE_FEATURE_STATUSES.size() + POST_FEATURE_STATUSES.size())
                     + barrier.size() * 2;
+        }
+
+        private int generationBatchSize() {
+            return PocketDebugSettings.generationBatchSize(totalOperations());
         }
 
         private int completedOperations() {

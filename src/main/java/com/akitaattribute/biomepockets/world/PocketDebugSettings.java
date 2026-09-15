@@ -9,48 +9,56 @@ import net.minecraftforge.fml.common.Mod;
 /**
  * Runtime-only tuning knobs exposed by the selector's Debug tab.
  *
- * These deliberately reset on every server start so an aggressive test value cannot
- * silently become the permanent behavior of a world/server. The safe production
- * defaults remain the same as before the debug controls were added.
+ * The names heightProbeAxis/generationOpsPerTick are retained as wire-compatible aliases
+ * for the build-143 packet shape. Their values now mean an exact number of chunk-center
+ * height probes and a percentage of a pocket's total generation-work counter.
  */
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketDebugSettings {
-    public static final int AUTO_HEIGHT_PROBE_AXIS = 0;
-    public static final int DEFAULT_GENERATION_OPS_PER_TICK = 1;
-    public static final int MAX_GENERATION_OPS_PER_TICK = 16;
+    public static final int DEFAULT_HEIGHT_PROBES = 1;
+    public static final int DEFAULT_GENERATION_BATCH_PERCENT = 1;
 
-    private static final int[] ALLOWED_PROBE_AXES = { 0, 1, 3, 5, 7, 9 };
+    // Kept for the existing packet handler. It now represents the maximum percentage.
+    public static final int MAX_GENERATION_OPS_PER_TICK = 100;
 
-    private static volatile int heightProbeAxis = AUTO_HEIGHT_PROBE_AXIS;
-    private static volatile int generationOpsPerTick = DEFAULT_GENERATION_OPS_PER_TICK;
+    private static final int[] ALLOWED_HEIGHT_PROBES = { 1, 5, 9 };
+    private static final int[] ALLOWED_BATCH_PERCENTS = { 1, 2, 5, 10, 20, 25, 50, 100 };
+
+    private static volatile int heightProbes = DEFAULT_HEIGHT_PROBES;
+    private static volatile int generationBatchPercent = DEFAULT_GENERATION_BATCH_PERCENT;
 
     private PocketDebugSettings() { }
 
-    public static int heightProbeAxis() {
-        return heightProbeAxis;
+    public static int heightProbes() {
+        return heightProbes;
+    }
+
+    public static int generationBatchPercent() {
+        return generationBatchPercent;
     }
 
     /**
-     * AUTO preserves the pre-debug behavior: 3x3 probes for a 3x3 pocket and 5x5 for
-     * every larger starting pocket.
+     * Wire-compatible alias used by the current selector-open packet.
      */
-    public static int effectiveHeightProbeAxis(int pocketRadius) {
-        int configured = heightProbeAxis;
-        if (configured == AUTO_HEIGHT_PROBE_AXIS) {
-            return pocketRadius <= 1 ? 3 : 5;
-        }
-        return configured;
+    public static int heightProbeAxis() {
+        return heightProbes;
     }
 
+    /**
+     * Wire-compatible alias used by the current selector-open packet.
+     */
     public static int generationOpsPerTick() {
-        return generationOpsPerTick;
+        return generationBatchPercent;
     }
 
-    public static void update(int requestedProbeAxis, int requestedOpsPerTick) {
-        heightProbeAxis = normalizeProbeAxis(requestedProbeAxis);
-        generationOpsPerTick = Math.max(
-                1,
-                Math.min(MAX_GENERATION_OPS_PER_TICK, requestedOpsPerTick));
+    public static int generationBatchSize(int totalOperations) {
+        int total = Math.max(1, totalOperations);
+        return Math.max(1, (total * generationBatchPercent + 99) / 100);
+    }
+
+    public static void update(int requestedHeightProbes, int requestedBatchPercent) {
+        heightProbes = normalizeProbeAxis(requestedHeightProbes);
+        generationBatchPercent = normalizeBatchPercent(requestedBatchPercent);
     }
 
     public static boolean canEdit(ServerPlayer player) {
@@ -61,18 +69,43 @@ public final class PocketDebugSettings {
                 || player.getServer().isSingleplayerOwner(player.getGameProfile());
     }
 
+    /**
+     * Retained under the old method name so the existing debug packet does not need a
+     * protocol-shape change. The input is now a probe COUNT, not a grid axis length.
+     */
     public static int normalizeProbeAxis(int requested) {
-        for (int allowed : ALLOWED_PROBE_AXES) {
+        for (int allowed : ALLOWED_HEIGHT_PROBES) {
             if (requested == allowed) {
                 return requested;
             }
         }
-        return AUTO_HEIGHT_PROBE_AXIS;
+        return DEFAULT_HEIGHT_PROBES;
+    }
+
+    public static int normalizeBatchPercent(int requested) {
+        for (int allowed : ALLOWED_BATCH_PERCENTS) {
+            if (requested == allowed) {
+                return requested;
+            }
+        }
+
+        // Packet values from an older build may not be one of the new steps. Snap to
+        // the nearest valid percentage rather than silently converting 16 to 100.
+        int nearest = ALLOWED_BATCH_PERCENTS[0];
+        int nearestDistance = Math.abs(requested - nearest);
+        for (int allowed : ALLOWED_BATCH_PERCENTS) {
+            int distance = Math.abs(requested - allowed);
+            if (distance < nearestDistance) {
+                nearest = allowed;
+                nearestDistance = distance;
+            }
+        }
+        return nearest;
     }
 
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
-        heightProbeAxis = AUTO_HEIGHT_PROBE_AXIS;
-        generationOpsPerTick = DEFAULT_GENERATION_OPS_PER_TICK;
+        heightProbes = DEFAULT_HEIGHT_PROBES;
+        generationBatchPercent = DEFAULT_GENERATION_BATCH_PERCENT;
     }
 }

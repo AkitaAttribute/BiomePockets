@@ -21,8 +21,9 @@ public class BiomeSelectorScreen extends Screen {
     private static final int TAB_HEIGHT = 20;
     private static final int LIST_TOP = 92;
     private static final int LIST_BOTTOM_MARGIN = 24;
-    private static final int[] PROBE_AXES = { 0, 1, 3, 5, 7, 9 };
-    private static final int MAX_GENERATION_OPS = 16;
+
+    private static final int[] PROBE_COUNTS = { 1, 5, 9 };
+    private static final int[] GENERATION_BATCH_PERCENTS = { 1, 2, 5, 10, 20, 25, 50, 100 };
 
     private final List<ResourceLocation> allBiomes;
     private final List<String> allNamespaces;
@@ -33,8 +34,9 @@ public class BiomeSelectorScreen extends Screen {
     private ViewMode viewMode = ViewMode.BIOMES;
     private String selectedNamespace;
     private int scrollOffset;
-    private int heightProbeAxis;
-    private int generationOpsPerTick;
+
+    private int heightProbeCount;
+    private int generationBatchPercent;
 
     public BiomeSelectorScreen(
             List<ResourceLocation> biomes,
@@ -50,15 +52,24 @@ public class BiomeSelectorScreen extends Screen {
                 .sorted()
                 .toList();
         this.filteredNamespaces = new ArrayList<>(this.allNamespaces);
-        this.heightProbeAxis = normalizeProbeAxis(heightProbeAxis);
-        this.generationOpsPerTick = Mth.clamp(generationOpsPerTick, 1, MAX_GENERATION_OPS);
+        this.heightProbeCount = normalizeSteppedValue(heightProbeAxis, PROBE_COUNTS, 1);
+        this.generationBatchPercent = normalizeSteppedValue(
+                generationOpsPerTick,
+                GENERATION_BATCH_PERCENTS,
+                1);
         this.debugEditable = debugEditable;
     }
 
     @Override
     protected void init() {
         int left = (this.width - PANEL_WIDTH) / 2;
-        this.searchBox = new EditBox(this.font, left + 12, 42, PANEL_WIDTH - 24, 20, new TextComponent("Search biomes"));
+        this.searchBox = new EditBox(
+                this.font,
+                left + 12,
+                42,
+                PANEL_WIDTH - 24,
+                20,
+                new TextComponent("Search biomes"));
         this.searchBox.setMaxLength(100);
         this.searchBox.setResponder(this::applyFilter);
         this.addRenderableWidget(this.searchBox);
@@ -75,7 +86,6 @@ public class BiomeSelectorScreen extends Screen {
         }
 
         String needle = query.trim().toLowerCase(Locale.ROOT);
-
         if (needle.startsWith("#")) {
             String namespaceNeedle = needle.substring(1);
             this.filteredBiomes = this.allBiomes.stream()
@@ -150,8 +160,14 @@ public class BiomeSelectorScreen extends Screen {
             for (int index = this.scrollOffset; index < end; index++) {
                 int row = index - this.scrollOffset;
                 int y = LIST_TOP + row * ROW_HEIGHT;
-                boolean hovered = mouseX >= left + 8 && mouseX < right - 8 && mouseY >= y && mouseY < y + ROW_HEIGHT - 2;
-                fill(poseStack, left + 8, y, right - 8, y + ROW_HEIGHT - 2, hovered ? 0xAA4B4B4B : 0xAA292929);
+                boolean hovered = mouseX >= left + 8 && mouseX < right - 8
+                        && mouseY >= y && mouseY < y + ROW_HEIGHT - 2;
+                fill(poseStack,
+                        left + 8,
+                        y,
+                        right - 8,
+                        y + ROW_HEIGHT - 2,
+                        hovered ? 0xAA4B4B4B : 0xAA292929);
 
                 if (showingBiomeRows()) {
                     ResourceLocation biome = this.filteredBiomes.get(index);
@@ -159,14 +175,27 @@ public class BiomeSelectorScreen extends Screen {
                     this.font.draw(poseStack, biome.toString(), left + 14, y + 16, 0xFFAAAAAA);
                 } else {
                     String namespace = this.filteredNamespaces.get(index);
-                    long count = this.allBiomes.stream().filter(id -> id.getNamespace().equals(namespace)).count();
+                    long count = this.allBiomes.stream()
+                            .filter(id -> id.getNamespace().equals(namespace))
+                            .count();
                     this.font.draw(poseStack, friendlyNamespace(namespace), left + 14, y + 5, 0xFFFFFF);
-                    this.font.draw(poseStack, "#" + namespace + "  -  " + count + " biomes", left + 14, y + 16, 0xFFAAAAAA);
+                    this.font.draw(
+                            poseStack,
+                            "#" + namespace + "  -  " + count + " biomes",
+                            left + 14,
+                            y + 16,
+                            0xFFAAAAAA);
                 }
             }
 
             if (rowCount == 0) {
-                drawCenteredString(poseStack, this.font, new TextComponent("No matching entries"), this.width / 2, LIST_TOP + 12, 0xFFAAAAAA);
+                drawCenteredString(
+                        poseStack,
+                        this.font,
+                        new TextComponent("No matching entries"),
+                        this.width / 2,
+                        LIST_TOP + 12,
+                        0xFFAAAAAA);
             }
             this.font.draw(poseStack, "Search", left + 12, 33, 0xFFBBBBBB);
         }
@@ -182,64 +211,152 @@ public class BiomeSelectorScreen extends Screen {
         int thirdLeft = secondLeft + tabWidth;
         int tabsRight = firstLeft + innerWidth;
 
-        fill(poseStack, firstLeft, TABS_TOP, secondLeft - 1, TABS_TOP + TAB_HEIGHT,
+        fill(poseStack,
+                firstLeft,
+                TABS_TOP,
+                secondLeft - 1,
+                TABS_TOP + TAB_HEIGHT,
                 this.viewMode == ViewMode.BIOMES ? 0xFF4B4B4B : 0xFF292929);
-        fill(poseStack, secondLeft + 1, TABS_TOP, thirdLeft - 1, TABS_TOP + TAB_HEIGHT,
+        fill(poseStack,
+                secondLeft + 1,
+                TABS_TOP,
+                thirdLeft - 1,
+                TABS_TOP + TAB_HEIGHT,
                 this.viewMode == ViewMode.MODS ? 0xFF4B4B4B : 0xFF292929);
-        fill(poseStack, thirdLeft + 1, TABS_TOP, tabsRight, TABS_TOP + TAB_HEIGHT,
+        fill(poseStack,
+                thirdLeft + 1,
+                TABS_TOP,
+                tabsRight,
+                TABS_TOP + TAB_HEIGHT,
                 this.viewMode == ViewMode.DEBUG ? 0xFF4B4B4B : 0xFF292929);
 
-        drawCenteredString(poseStack, this.font, new TextComponent("Biomes"),
-                firstLeft + tabWidth / 2, TABS_TOP + 6, 0xFFFFFF);
-        String modsLabel = this.viewMode == ViewMode.MODS && this.selectedNamespace != null ? "< Mods" : "Mods";
-        drawCenteredString(poseStack, this.font, new TextComponent(modsLabel),
-                secondLeft + tabWidth / 2, TABS_TOP + 6, 0xFFFFFF);
-        drawCenteredString(poseStack, this.font, new TextComponent("Debug"),
-                thirdLeft + tabWidth / 2, TABS_TOP + 6, 0xFFFFFF);
+        drawCenteredString(
+                poseStack,
+                this.font,
+                new TextComponent("Biomes"),
+                firstLeft + tabWidth / 2,
+                TABS_TOP + 6,
+                0xFFFFFF);
+        String modsLabel = this.viewMode == ViewMode.MODS && this.selectedNamespace != null
+                ? "< Mods"
+                : "Mods";
+        drawCenteredString(
+                poseStack,
+                this.font,
+                new TextComponent(modsLabel),
+                secondLeft + tabWidth / 2,
+                TABS_TOP + 6,
+                0xFFFFFF);
+        drawCenteredString(
+                poseStack,
+                this.font,
+                new TextComponent("Debug"),
+                thirdLeft + tabWidth / 2,
+                TABS_TOP + 6,
+                0xFFFFFF);
     }
 
     private void renderDebug(PoseStack poseStack, int left, int right) {
         int x = left + 18;
         int rowRight = right - 18;
         int firstY = LIST_TOP + 12;
-        int secondY = firstY + 66;
+        int secondY = firstY + 82;
 
         this.font.draw(poseStack, "Runtime generation tuning", x, firstY, 0xFFFFFFFF);
-        this.font.draw(poseStack,
-                this.debugEditable ? "Changes apply server-wide until restart." : "Operator permission is required on multiplayer.",
-                x, firstY + 12, 0xFFAAAAAA);
+        this.font.draw(
+                poseStack,
+                this.debugEditable
+                        ? "Changes apply server-wide until restart."
+                        : "Operator permission is required on multiplayer.",
+                x,
+                firstY + 12,
+                0xFFAAAAAA);
 
-        renderDebugControl(poseStack, x, rowRight, firstY + 30,
-                "Height probes", heightProbeLabel());
-        this.font.draw(poseStack,
-                "Candidate terrain probes per seed. More = stricter/slower.",
-                x, firstY + 53, 0xFF888888);
+        renderDebugControl(
+                poseStack,
+                x,
+                rowRight,
+                firstY + 30,
+                "Height probes / seed",
+                Integer.toString(this.heightProbeCount));
+        this.font.draw(
+                poseStack,
+                "Each probe checks the center of one chunk. Default 1 = center chunk only.",
+                x,
+                firstY + 53,
+                0xFF888888);
+        this.font.draw(
+                poseStack,
+                "Overworld: ocean < Y64, ordinary land Y64-80, mountain > Y80.",
+                x,
+                firstY + 64,
+                0xFF888888);
 
-        renderDebugControl(poseStack, x, rowRight, secondY + 18,
-                "Generation ops / tick", Integer.toString(this.generationOpsPerTick));
-        this.font.draw(poseStack,
-                "Max chunk-status requests submitted/in flight. 1 = safe default.",
-                x, secondY + 41, 0xFF888888);
+        renderDebugControl(
+                poseStack,
+                x,
+                rowRight,
+                secondY + 18,
+                "Generation work / tick",
+                this.generationBatchPercent + "%");
+        this.font.draw(
+                poseStack,
+                "Percent of the pocket's X/Y generation-work counter allowed per burst.",
+                x,
+                secondY + 41,
+                0xFF888888);
+        this.font.draw(
+                poseStack,
+                "It scales with pocket size; this is not a block count.",
+                x,
+                secondY + 52,
+                0xFF888888);
     }
 
-    private void renderDebugControl(PoseStack poseStack, int left, int right, int y, String label, String value) {
+    private void renderDebugControl(
+            PoseStack poseStack,
+            int left,
+            int right,
+            int y,
+            String label,
+            String value) {
         fill(poseStack, left, y, right, y + 20, 0xAA292929);
         this.font.draw(poseStack, label, left + 6, y + 6, 0xFFFFFFFF);
         int minusLeft = right - 112;
         int plusLeft = right - 24;
-        fill(poseStack, minusLeft, y + 1, minusLeft + 22, y + 19, this.debugEditable ? 0xFF4B4B4B : 0xFF333333);
-        fill(poseStack, plusLeft, y + 1, plusLeft + 22, y + 19, this.debugEditable ? 0xFF4B4B4B : 0xFF333333);
-        drawCenteredString(poseStack, this.font, new TextComponent("-"), minusLeft + 11, y + 6, 0xFFFFFFFF);
-        drawCenteredString(poseStack, this.font, new TextComponent("+"), plusLeft + 11, y + 6, 0xFFFFFFFF);
-        drawCenteredString(poseStack, this.font, new TextComponent(value), right - 57, y + 6, 0xFFFFFFFF);
-    }
-
-    private String heightProbeLabel() {
-        if (this.heightProbeAxis == 0) {
-            return "Auto (9/25)";
-        }
-        return Integer.toString(this.heightProbeAxis * this.heightProbeAxis)
-                + " (" + this.heightProbeAxis + "x" + this.heightProbeAxis + ")";
+        fill(poseStack,
+                minusLeft,
+                y + 1,
+                minusLeft + 22,
+                y + 19,
+                this.debugEditable ? 0xFF4B4B4B : 0xFF333333);
+        fill(poseStack,
+                plusLeft,
+                y + 1,
+                plusLeft + 22,
+                y + 19,
+                this.debugEditable ? 0xFF4B4B4B : 0xFF333333);
+        drawCenteredString(
+                poseStack,
+                this.font,
+                new TextComponent("-"),
+                minusLeft + 11,
+                y + 6,
+                0xFFFFFFFF);
+        drawCenteredString(
+                poseStack,
+                this.font,
+                new TextComponent("+"),
+                plusLeft + 11,
+                y + 6,
+                0xFFFFFFFF);
+        drawCenteredString(
+                poseStack,
+                this.font,
+                new TextComponent(value),
+                right - 57,
+                y + 6,
+                0xFFFFFFFF);
     }
 
     @Override
@@ -289,7 +406,8 @@ public class BiomeSelectorScreen extends Screen {
         int index = this.scrollOffset + row;
         if (showingBiomeRows()) {
             if (index >= 0 && index < this.filteredBiomes.size()) {
-                NetworkHandler.CHANNEL.sendToServer(new SelectBiomePacket(this.filteredBiomes.get(index)));
+                NetworkHandler.CHANNEL.sendToServer(
+                        new SelectBiomePacket(this.filteredBiomes.get(index)));
                 this.onClose();
                 return true;
             }
@@ -306,59 +424,70 @@ public class BiomeSelectorScreen extends Screen {
             return false;
         }
 
-        int left = panelLeft + 18;
         int right = panelLeft + PANEL_WIDTH - 18;
         int firstY = LIST_TOP + 42;
-        int secondY = LIST_TOP + 96;
+        int secondY = LIST_TOP + 112;
         int minusLeft = right - 112;
         int plusLeft = right - 24;
 
         boolean changed = false;
         if (mouseY >= firstY && mouseY < firstY + 20) {
             if (mouseX >= minusLeft && mouseX < minusLeft + 22) {
-                this.heightProbeAxis = cycleProbeAxis(this.heightProbeAxis, -1);
+                this.heightProbeCount = cycleSteppedValue(
+                        this.heightProbeCount,
+                        PROBE_COUNTS,
+                        -1);
                 changed = true;
             } else if (mouseX >= plusLeft && mouseX < plusLeft + 22) {
-                this.heightProbeAxis = cycleProbeAxis(this.heightProbeAxis, 1);
+                this.heightProbeCount = cycleSteppedValue(
+                        this.heightProbeCount,
+                        PROBE_COUNTS,
+                        1);
                 changed = true;
             }
         } else if (mouseY >= secondY && mouseY < secondY + 20) {
             if (mouseX >= minusLeft && mouseX < minusLeft + 22) {
-                this.generationOpsPerTick = Math.max(1, this.generationOpsPerTick - 1);
+                this.generationBatchPercent = cycleSteppedValue(
+                        this.generationBatchPercent,
+                        GENERATION_BATCH_PERCENTS,
+                        -1);
                 changed = true;
             } else if (mouseX >= plusLeft && mouseX < plusLeft + 22) {
-                this.generationOpsPerTick = Math.min(MAX_GENERATION_OPS, this.generationOpsPerTick + 1);
+                this.generationBatchPercent = cycleSteppedValue(
+                        this.generationBatchPercent,
+                        GENERATION_BATCH_PERCENTS,
+                        1);
                 changed = true;
             }
         }
 
         if (changed) {
             NetworkHandler.CHANNEL.sendToServer(new UpdateDebugSettingsPacket(
-                    this.heightProbeAxis,
-                    this.generationOpsPerTick));
+                    this.heightProbeCount,
+                    this.generationBatchPercent));
         }
         return changed;
     }
 
-    private static int cycleProbeAxis(int current, int direction) {
+    private static int cycleSteppedValue(int current, int[] values, int direction) {
         int index = 0;
-        for (int i = 0; i < PROBE_AXES.length; i++) {
-            if (PROBE_AXES[i] == current) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == current) {
                 index = i;
                 break;
             }
         }
-        index = Mth.clamp(index + direction, 0, PROBE_AXES.length - 1);
-        return PROBE_AXES[index];
+        index = Mth.clamp(index + direction, 0, values.length - 1);
+        return values[index];
     }
 
-    private static int normalizeProbeAxis(int value) {
-        for (int allowed : PROBE_AXES) {
-            if (value == allowed) {
+    private static int normalizeSteppedValue(int current, int[] values, int fallback) {
+        for (int value : values) {
+            if (current == value) {
                 return value;
             }
         }
-        return 0;
+        return fallback;
     }
 
     @Override
@@ -370,7 +499,10 @@ public class BiomeSelectorScreen extends Screen {
         int rowCount = showingBiomeRows() ? this.filteredBiomes.size() : this.filteredNamespaces.size();
         int maxOffset = Math.max(0, rowCount - visibleRows);
         if (delta != 0.0D) {
-            this.scrollOffset = Mth.clamp(this.scrollOffset - (int) Math.signum(delta), 0, maxOffset);
+            this.scrollOffset = Mth.clamp(
+                    this.scrollOffset - (int) Math.signum(delta),
+                    0,
+                    maxOffset);
             return true;
         }
         return super.mouseScrolled(mouseX, mouseY, delta);
