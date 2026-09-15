@@ -11,7 +11,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 
-public record OpenBiomeSelectorPacket(List<ResourceLocation> biomes) {
+public record OpenBiomeSelectorPacket(
+        List<ResourceLocation> biomes,
+        int heightProbeAxis,
+        int generationOpsPerTick,
+        boolean debugEditable) {
     public OpenBiomeSelectorPacket {
         biomes = List.copyOf(biomes);
     }
@@ -21,6 +25,9 @@ public record OpenBiomeSelectorPacket(List<ResourceLocation> biomes) {
         for (ResourceLocation biome : message.biomes) {
             buffer.writeResourceLocation(biome);
         }
+        buffer.writeVarInt(message.heightProbeAxis);
+        buffer.writeVarInt(message.generationOpsPerTick);
+        buffer.writeBoolean(message.debugEditable);
     }
 
     public static OpenBiomeSelectorPacket decode(FriendlyByteBuf buffer) {
@@ -29,13 +36,21 @@ public record OpenBiomeSelectorPacket(List<ResourceLocation> biomes) {
         for (int i = 0; i < count; i++) {
             biomes.add(buffer.readResourceLocation());
         }
-        return new OpenBiomeSelectorPacket(biomes);
+        return new OpenBiomeSelectorPacket(
+                biomes,
+                buffer.readVarInt(),
+                buffer.readVarInt(),
+                buffer.readBoolean());
     }
 
     public static void handle(OpenBiomeSelectorPacket message, Supplier<NetworkEvent.Context> contextSupplier) {
         NetworkEvent.Context context = contextSupplier.get();
         context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
-                () -> () -> ClientHooks.openBiomeSelector(message.biomes)));
+                () -> () -> ClientHooks.openBiomeSelector(
+                        message.biomes,
+                        message.heightProbeAxis,
+                        message.generationOpsPerTick,
+                        message.debugEditable)));
         context.setPacketHandled(true);
     }
 }
