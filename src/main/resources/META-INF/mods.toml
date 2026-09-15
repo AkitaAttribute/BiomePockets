@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[40,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="biomepockets"
+version="${version}"
+displayName="BiomePockets"
+authors="AkitaAttribute"
+description='''
+Creates temporary single-biome pocket dimensions from any biome registered on the server.
+'''
+
+[[dependencies.biomepockets]]
+modId="forge"
+mandatory=true
+versionRange="[40,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.biomepockets]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.18.2,1.19)"
+ordering="NONE"
+side="BOTH"
