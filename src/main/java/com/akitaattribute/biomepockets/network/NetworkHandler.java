@@ -2,6 +2,7 @@ package com.akitaattribute.biomepockets.network;
 
 import com.akitaattribute.biomepockets.BiomePockets;
 import com.akitaattribute.biomepockets.world.PocketClaimManager;
+import com.akitaattribute.biomepockets.world.PocketDebugSettings;
 import com.akitaattribute.biomepockets.world.PocketFriendlyExpansionManager;
 import net.minecraft.core.Registry;
 import net.minecraft.resources.ResourceLocation;
@@ -14,7 +15,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 import java.util.List;
 
 public final class NetworkHandler {
-    private static final String PROTOCOL = "4";
+    private static final String PROTOCOL = "5";
     private static int packetId = 0;
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
@@ -31,6 +32,10 @@ public final class NetworkHandler {
                 OpenBiomeSelectorPacket::encode, OpenBiomeSelectorPacket::decode, OpenBiomeSelectorPacket::handle);
         CHANNEL.registerMessage(packetId++, SelectBiomePacket.class,
                 SelectBiomePacket::encode, SelectBiomePacket::decode, SelectBiomePacket::handle);
+        CHANNEL.registerMessage(packetId++, UpdateDebugSettingsPacket.class,
+                UpdateDebugSettingsPacket::encode,
+                UpdateDebugSettingsPacket::decode,
+                UpdateDebugSettingsPacket::handle);
         CHANNEL.registerMessage(packetId++, OpenPocketManagerPacket.class,
                 OpenPocketManagerPacket::encode, OpenPocketManagerPacket::decode, OpenPocketManagerPacket::handle);
         CHANNEL.registerMessage(packetId++, PocketManagerActionPacket.class,
@@ -50,7 +55,13 @@ public final class NetworkHandler {
     }
 
     public static void openSelector(ServerPlayer player, List<ResourceLocation> biomes) {
-        CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new OpenBiomeSelectorPacket(biomes));
+        CHANNEL.send(
+                PacketDistributor.PLAYER.with(() -> player),
+                new OpenBiomeSelectorPacket(
+                        biomes,
+                        PocketDebugSettings.heightProbeAxis(),
+                        PocketDebugSettings.generationOpsPerTick(),
+                        PocketDebugSettings.canEdit(player)));
     }
 
     public static void openPocketManager(ServerPlayer player) {
