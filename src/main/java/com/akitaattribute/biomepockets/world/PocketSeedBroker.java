@@ -283,8 +283,9 @@ public final class PocketSeedBroker {
             long seed) {
         try {
             ChunkGenerator generator = referenceLevel.getChunkSource().getGenerator().withSeed(seed);
-            int[] offsets = sampleOffsets(radius);
-            int sampleCount = offsets.length * offsets.length;
+            int probeAxis = PocketDebugSettings.effectiveHeightProbeAxis(radius);
+            int[] blockOffsets = sampleBlockOffsets(radius, probeAxis);
+            int sampleCount = blockOffsets.length * blockOffsets.length;
             int required = sampleCount / 2 + 1;
             boolean targetWantsWater = profile == Profile.OVERWORLD && isWaterBiome(targetId);
 
@@ -300,15 +301,10 @@ public final class PocketSeedBroker {
             int sampleIndex = 0;
 
             int seaLevel = generator.getSeaLevel();
-            for (int chunkX : offsets) {
-                for (int chunkZ : offsets) {
-                    int blockX = chunkX * 16 + 8;
-                    int blockZ = chunkZ * 16 + 8;
-
+            for (int blockX : blockOffsets) {
+                for (int blockZ : blockOffsets) {
                     /*
-                     * Build 134 evaluated WORLD_SURFACE_WG plus OCEAN_FLOOR_WG here,
-                     * then evaluated OCEAN_FLOOR_WG a second time below for dominant
-                     * bucketing. One solid-surface height is enough. On the Overworld,
+                     * One solid-surface height is enough. On the Overworld,
                      * max(oceanFloor, seaLevel) is also the correct altitude at which to
                      * ask for the surface biome: sea level over water, terrain height on
                      * dry land. Nether/End use their ordinary world-surface height.
@@ -361,7 +357,8 @@ public final class PocketSeedBroker {
                         targetTerrainMatches++;
                     }
 
-                    if (chunkX == 0 && chunkZ == 0) {
+                    // Chunk 0's center is block 8,8. All odd probe grids include it.
+                    if (blockX == 8 && blockZ == 8) {
                         centerBiome = naturalId;
                         centerTerrainMatches = terrainMatches;
                         centerSubmerged = submerged;
@@ -433,19 +430,27 @@ public final class PocketSeedBroker {
     }
 
     /**
-     * Up to five sample rows/columns across the actual starting footprint. This gives a
-     * 9x9 pocket 25 probes instead of assuming three probes can represent 81 chunks,
-     * while keeping seed testing much cheaper than generating even one real chunk.
+     * Returns an odd square probe grid distributed across the real starting footprint.
+     * The coordinates are centered on block 8,8 (the center of chunk 0). AUTO is
+     * resolved by PocketDebugSettings before this method: 3x3 for a 3x3 pocket and 5x5
+     * for larger pockets. Explicit debug values can request 1x1 through 9x9 probes.
      */
-    private static int[] sampleOffsets(int radius) {
-        if (radius <= 1) {
-            return new int[] { -1, 0, 1 };
+    private static int[] sampleBlockOffsets(int radius, int requestedAxis) {
+        int axis = Math.max(1, Math.min(9, requestedAxis));
+        if ((axis & 1) == 0) {
+            axis = Math.min(9, axis + 1);
         }
-        if (radius == 2) {
-            return new int[] { -2, -1, 0, 1, 2 };
+        if (axis == 1) {
+            return new int[] { 8 };
         }
-        int middle = Math.max(1, radius / 2);
-        return new int[] { -radius, -middle, 0, middle, radius };
+
+        int halfSpan = Math.max(1, radius) * 16;
+        int[] result = new int[axis];
+        for (int index = 0; index < axis; index++) {
+            double fraction = index / (double) (axis - 1);
+            result[index] = 8 + (int) Math.round(-halfSpan + (2.0D * halfSpan * fraction));
+        }
+        return result;
     }
 
     private static boolean isWaterBiome(ResourceLocation biomeId) {
