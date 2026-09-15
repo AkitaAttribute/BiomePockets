@@ -47,15 +47,11 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Creates new pockets without flooding Minecraft's world-generation pipeline.
  *
- * The previous implementation submitted every playable chunk at FULL at once. Even a
- * 3x3 pocket could therefore schedule a large dependency graph concurrently and starve
- * the live server while worldgen caught up. This scheduler advances generation one
- * ChunkStatus request at a time globally and leaves one full server tick idle between
- * requests. Multiple players share the same throttle rather than multiplying load.
- *
- * The player is still not teleported until all playable chunks are FULL and the outer
- * barrier ring has been repaired. Preparation takes longer by design; normal gameplay
- * on the server gets priority over pocket completion speed.
+ * By default this remains the original friendly scheduler: one ChunkStatus request in
+ * flight globally, followed by one quiet server tick. The selector Debug tab can raise
+ * the per-tick/in-flight budget for performance testing. Requests are still stage-safe:
+ * several chunks may run concurrently at the same generation status, but a job cannot
+ * advance to its next status until every request from the current status has completed.
  */
 @Mod.EventBusSubscriber(modid = BiomePockets.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class PocketThrottledInitialGenerator {
@@ -78,12 +74,12 @@ public final class PocketThrottledInitialGenerator {
             ChunkStatus.HEIGHTMAPS,
             ChunkStatus.FULL);
 
-    /** One completely idle tick after each generation request completes. */
-    private static final int QUIET_TICKS_BETWEEN_REQUESTS = 1;
+    /** One completely idle tick whenever the global request burst drains to zero. */
+    private static final int QUIET_TICKS_BETWEEN_BURSTS = 1;
 
     private static final Deque<GenerationJob> JOBS = new ArrayDeque<>();
     private static final Map<UUID, GenerationJob> JOBS_BY_PLAYER = new HashMap<>();
-    private static boolean requestInFlight;
+    private static int requestsInFlight;
     private static int quietTicksRemaining;
 
     private PocketThrottledInitialGenerator() { }
@@ -133,12 +129,13 @@ public final class PocketThrottledInitialGenerator {
             JOBS_BY_PLAYER.put(player.getUUID(), job);
 
             BiomePockets.LOGGER.info(
-                    "Queued server-friendly {} pocket {} at {}x{} ({} generation operations)",
+                    "Queued server-friendly {} pocket {} at {}x{} ({} generation operations, debug budget={}/tick)",
                     biomeId,
                     levelKey.location(),
                     size,
                     size,
-                    job.totalOperations());
+                    job.totalOperations(),
+                    PocketDebugSettings.generationOpsPerTick());
             player.displayClientMessage(
                     new TextComponent("Preparing " + biomeId + " biome pocket (" + size + "x" + size
                             + ") at server-friendly speed..."),
@@ -171,17 +168,25 @@ public final class PocketThrottledInitialGenerator {
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || requestInFlight || JOBS.isEmpty()) {
+        if (event.phase != TickEvent.Phase.END || JOBS.isEmpty()) {
             return;
         }
 
-        if (quietTicksRemaining > 0) {
+        int limit = PocketDebugSettings.generationOpsPerTick();
+        if (requestsInFlight >= limit) {
+            return;
+        }
+
+        // Preserve the old friendly cadence when the burst has fully drained. At the
+        // default limit of one this is exactly one quiet tick after every operation.
+        if (requestsInFlight == 0 && quietTicksRemaining > 0) {
             quietTicksRemaining--;
             return;
         }
 
-        int jobsToCheck = JOBS.size();
-        while (jobsToCheck-- > 0) {
+        int budget = limit - requestsInFlight;
+        int stalledJobs = 0;
+        while (budget > 0 && !JOBS.isEmpty() && stalledJobs < JOBS.size()) {
             GenerationJob job = JOBS.pollFirst();
             if (job == null) {
                 return;
@@ -189,14 +194,28 @@ public final class PocketThrottledInitialGenerator {
 
             if (!isJobValid(job)) {
                 cancelJob(job, null);
+                stalledJobs = 0;
                 continue;
             }
 
-            // Round-robin queued players. The global in-flight guard still guarantees
-            // that only one pocket worldgen request exists at a time.
+            if (job.readyToFinish()) {
+                finishJob(job);
+                stalledJobs = 0;
+                continue;
+            }
+
+            GenerationRequest request = job.reserveNextRequest();
             JOBS.addLast(job);
-            submitNextOperation(job);
-            return;
+            if (request == null) {
+                // This job has submitted its whole current stage and is waiting for
+                // outstanding requests to finish. Give another queued player a chance.
+                stalledJobs++;
+                continue;
+            }
+
+            submitOperation(job, request);
+            budget--;
+            stalledJobs = 0;
         }
     }
 
@@ -207,7 +226,7 @@ public final class PocketThrottledInitialGenerator {
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
-        for (GenerationJob job : JOBS) {
+        for (GenerationJob job : new ArrayList<>(JOBS)) {
             job.cancelled = true;
         }
         resetRuntimeState();
@@ -216,7 +235,7 @@ public final class PocketThrottledInitialGenerator {
     private static void resetRuntimeState() {
         JOBS.clear();
         JOBS_BY_PLAYER.clear();
-        requestInFlight = false;
+        requestsInFlight = 0;
         quietTicksRemaining = 0;
     }
 
@@ -227,34 +246,48 @@ public final class PocketThrottledInitialGenerator {
                 && job.server.getPlayerList().getPlayer(job.playerId) != null;
     }
 
-    private static void submitNextOperation(GenerationJob job) {
-        GenerationRequest request = job.nextRequest();
-        if (request == null) {
-            finishJob(job);
+    private static void submitOperation(GenerationJob job, GenerationRequest request) {
+        requestsInFlight++;
+        long startedNanos = System.nanoTime();
+        CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future;
+        try {
+            future = job.pocket.getChunkSource().getChunkFuture(
+                    request.pos().x,
+                    request.pos().z,
+                    request.status(),
+                    true);
+        } catch (RuntimeException exception) {
+            requestsInFlight = Math.max(0, requestsInFlight - 1);
+            job.requestFinished(false);
+            cancelJob(job, "Biome pocket generation failed. See server log.");
+            BiomePockets.LOGGER.error(
+                    "Pocket {} threw while submitting generation at {} for chunk {}",
+                    job.levelKey.location(),
+                    request.status(),
+                    request.pos(),
+                    exception);
             return;
         }
 
-        requestInFlight = true;
-        long startedNanos = System.nanoTime();
-        CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> future =
-                job.pocket.getChunkSource().getChunkFuture(
-                        request.pos().x,
-                        request.pos().z,
-                        request.status(),
-                        true);
-
         future.whenComplete((result, throwable) -> job.server.execute(() -> {
-            requestInFlight = false;
-            quietTicksRemaining = QUIET_TICKS_BETWEEN_REQUESTS;
+            requestsInFlight = Math.max(0, requestsInFlight - 1);
+            if (requestsInFlight == 0) {
+                quietTicksRemaining = QUIET_TICKS_BETWEEN_BURSTS;
+            }
 
-            if (job.cancelled || JOBS_BY_PLAYER.get(job.playerId) != job) {
+            if (job.cancelled) {
+                job.requestFinished(false);
+                finalizeCancelledJobIfDrained(job);
                 return;
             }
+
             if (!isJobValid(job)) {
+                job.requestFinished(false);
                 cancelJob(job, null);
                 return;
             }
             if (throwable != null || result == null || result.left().isEmpty()) {
+                job.requestFinished(false);
                 BiomePockets.LOGGER.error(
                         "Pocket {} failed throttled generation at {} for chunk {}",
                         job.levelKey.location(),
@@ -267,13 +300,14 @@ public final class PocketThrottledInitialGenerator {
 
             if (request.repairBarrier()) {
                 if (!(job.pocket.getChunkSource().getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
+                    job.requestFinished(false);
                     cancelJob(job, "Biome pocket containment failed. See server log.");
                     return;
                 }
                 job.repairedBarrierBlocks += generator.repairBarrierChunk(result.left().get());
             }
 
-            job.completeRequest();
+            job.requestFinished(true);
             long elapsedMillis = (System.nanoTime() - startedNanos) / 1_000_000L;
             if (elapsedMillis >= 100L) {
                 BiomePockets.LOGGER.debug(
@@ -305,13 +339,14 @@ public final class PocketThrottledInitialGenerator {
             cancelJob(job, null);
             return;
         }
+        if (!job.readyToFinish()) {
+            return;
+        }
         if (!(job.pocket.getChunkSource().getGenerator() instanceof BoundedNoiseBasedChunkGenerator generator)) {
             cancelJob(job, "Biome pocket containment failed. See server log.");
             return;
         }
 
-        // This scan is intentionally left until all generation has finished. Barrier
-        // chunk repair has already been spread across individual server ticks.
         int removedVines = generator.removeBarrierSupportedVines(job.pocket);
         if (job.repairedBarrierBlocks > 0 || removedVines > 0) {
             BiomePockets.LOGGER.info(
@@ -347,16 +382,25 @@ public final class PocketThrottledInitialGenerator {
     }
 
     private static void cancelJob(GenerationJob job, String message) {
-        job.cancelled = true;
-        removeJob(job);
+        if (!job.cancelled) {
+            job.cancelled = true;
+            removeJob(job);
 
-        if (message != null) {
-            ServerPlayer player = job.server.getPlayerList().getPlayer(job.playerId);
-            if (player != null) {
-                player.displayClientMessage(new TextComponent(message), false);
+            if (message != null) {
+                ServerPlayer player = job.server.getPlayerList().getPlayer(job.playerId);
+                if (player != null) {
+                    player.displayClientMessage(new TextComponent(message), false);
+                }
             }
         }
+        finalizeCancelledJobIfDrained(job);
+    }
 
+    private static void finalizeCancelledJobIfDrained(GenerationJob job) {
+        if (job.cleanupFinalized || job.inFlightRequests() > 0) {
+            return;
+        }
+        job.cleanupFinalized = true;
         if (PocketDimensionManager.isOwned(job.levelKey)) {
             PocketDimensionManager.teardownIfEmpty(job.server, job.levelKey);
         }
@@ -375,8 +419,6 @@ public final class PocketThrottledInitialGenerator {
             }
         }
 
-        // Center-out ordering gets the eventual spawn neighborhood ready first and
-        // maximizes reuse of neighboring chunk-status dependencies.
         result.sort(Comparator
                 .comparingInt((ChunkPos pos) -> Math.max(Math.abs(pos.x), Math.abs(pos.z)))
                 .thenComparingInt(pos -> Math.abs(pos.x) + Math.abs(pos.z))
@@ -483,9 +525,11 @@ public final class PocketThrottledInitialGenerator {
         private Phase phase = Phase.PLAYABLE_PRE_FEATURES;
         private int statusIndex;
         private int chunkIndex;
+        private int inFlightRequests;
         private int completedOperations;
         private int repairedBarrierBlocks;
         private boolean cancelled;
+        private boolean cleanupFinalized;
 
         private GenerationJob(
                 MinecraftServer server,
@@ -504,9 +548,18 @@ public final class PocketThrottledInitialGenerator {
             this.barrier = barrier;
         }
 
-        private GenerationRequest nextRequest() {
-            normalizePhase();
-            return switch (phase) {
+        /**
+         * Reserves one operation from the current generation stage. Reservation advances
+         * only the chunk cursor; the next status/phase is locked until every reserved
+         * operation from this stage has completed.
+         */
+        private GenerationRequest reserveNextRequest() {
+            advanceStageIfDrained();
+            if (phase == Phase.FINISHED || chunkIndex >= currentStageSize()) {
+                return null;
+            }
+
+            GenerationRequest request = switch (phase) {
                 case PLAYABLE_PRE_FEATURES -> new GenerationRequest(
                         playable.get(chunkIndex),
                         PRE_FEATURE_STATUSES.get(statusIndex),
@@ -525,58 +578,86 @@ public final class PocketThrottledInitialGenerator {
                         true);
                 case FINISHED -> null;
             };
+
+            if (request != null) {
+                chunkIndex++;
+                inFlightRequests++;
+            }
+            return request;
         }
 
-        private void completeRequest() {
-            completedOperations++;
-            chunkIndex++;
-            normalizePhase();
+        private void requestFinished(boolean success) {
+            if (inFlightRequests > 0) {
+                inFlightRequests--;
+            }
+            if (success) {
+                completedOperations++;
+            }
+            advanceStageIfDrained();
         }
 
-        private void normalizePhase() {
+        private void advanceStageIfDrained() {
+            if (inFlightRequests != 0) {
+                return;
+            }
+
             boolean changed;
             do {
                 changed = false;
+                int stageSize = currentStageSize();
+                if (phase != Phase.FINISHED && chunkIndex < stageSize) {
+                    return;
+                }
+
                 switch (phase) {
                     case PLAYABLE_PRE_FEATURES -> {
-                        if (chunkIndex >= playable.size()) {
-                            chunkIndex = 0;
-                            statusIndex++;
-                            if (statusIndex >= PRE_FEATURE_STATUSES.size()) {
-                                statusIndex = 0;
-                                phase = Phase.BARRIER_NOISE;
-                            }
-                            changed = true;
+                        chunkIndex = 0;
+                        statusIndex++;
+                        if (statusIndex >= PRE_FEATURE_STATUSES.size()) {
+                            statusIndex = 0;
+                            phase = Phase.BARRIER_NOISE;
                         }
+                        changed = true;
                     }
                     case BARRIER_NOISE -> {
-                        if (chunkIndex >= barrier.size()) {
-                            chunkIndex = 0;
-                            phase = Phase.PLAYABLE_POST_FEATURES;
-                            changed = true;
-                        }
+                        chunkIndex = 0;
+                        phase = Phase.PLAYABLE_POST_FEATURES;
+                        changed = true;
                     }
                     case PLAYABLE_POST_FEATURES -> {
-                        if (chunkIndex >= playable.size()) {
-                            chunkIndex = 0;
-                            statusIndex++;
-                            if (statusIndex >= POST_FEATURE_STATUSES.size()) {
-                                statusIndex = 0;
-                                phase = Phase.BARRIER_REPAIR;
-                            }
-                            changed = true;
+                        chunkIndex = 0;
+                        statusIndex++;
+                        if (statusIndex >= POST_FEATURE_STATUSES.size()) {
+                            statusIndex = 0;
+                            phase = Phase.BARRIER_REPAIR;
                         }
+                        changed = true;
                     }
                     case BARRIER_REPAIR -> {
-                        if (chunkIndex >= barrier.size()) {
-                            chunkIndex = 0;
-                            phase = Phase.FINISHED;
-                            changed = true;
-                        }
+                        chunkIndex = 0;
+                        phase = Phase.FINISHED;
+                        changed = true;
                     }
                     case FINISHED -> { }
                 }
             } while (changed && phase != Phase.FINISHED);
+        }
+
+        private int currentStageSize() {
+            return switch (phase) {
+                case PLAYABLE_PRE_FEATURES, PLAYABLE_POST_FEATURES -> playable.size();
+                case BARRIER_NOISE, BARRIER_REPAIR -> barrier.size();
+                case FINISHED -> 0;
+            };
+        }
+
+        private boolean readyToFinish() {
+            advanceStageIfDrained();
+            return phase == Phase.FINISHED && inFlightRequests == 0;
+        }
+
+        private int inFlightRequests() {
+            return inFlightRequests;
         }
 
         private int totalOperations() {
