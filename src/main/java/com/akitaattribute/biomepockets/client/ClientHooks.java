@@ -9,8 +9,16 @@ import java.util.List;
 public final class ClientHooks {
     private ClientHooks() { }
 
-    public static void openBiomeSelector(List<ResourceLocation> biomes) {
-        Minecraft.getInstance().setScreen(new BiomeSelectorScreen(biomes));
+    public static void openBiomeSelector(
+            List<ResourceLocation> biomes,
+            int heightProbeAxis,
+            int generationOpsPerTick,
+            boolean debugEditable) {
+        Minecraft.getInstance().setScreen(new BiomeSelectorScreen(
+                biomes,
+                heightProbeAxis,
+                generationOpsPerTick,
+                debugEditable));
     }
 
     public static void openPocketManager(OpenPocketManagerPacket state) {
